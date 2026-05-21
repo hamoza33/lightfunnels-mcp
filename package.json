@@ -1,0 +1,55 @@
+{
+  "name": "lightfunnels-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server for the Lightfunnels GraphQL API. Exposes orders, products, funnels, customers and analytics as MCP tools so ChatGPT, Claude, Cursor and any MCP-compatible client can query them.",
+  "type": "module",
+  "bin": {
+    "lightfunnels-mcp": "dist/server.js",
+    "lightfunnels-mcp-http": "dist/http.js"
+  },
+  "main": "dist/server.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/server.js dist/http.js",
+    "start": "node dist/server.js",
+    "start:http": "node dist/http.js",
+    "dev": "tsx src/server.ts",
+    "dev:http": "tsx src/http.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "lightfunnels",
+    "ecommerce",
+    "graphql",
+    "chatgpt",
+    "claude",
+    "cursor"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "express": "^4.21.2",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.24.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
