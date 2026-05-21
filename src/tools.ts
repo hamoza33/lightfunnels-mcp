@@ -78,6 +78,9 @@ const ORDER_FIELDS = `
   _id
   name
   total
+  subtotal
+  shipping
+  currency
   fulfillment_status
   financial_status
   customer {
@@ -88,7 +91,6 @@ const ORDER_FIELDS = `
     phone
   }
   cancelled_at
-  date
   test
   created_at
   updated_at
@@ -100,10 +102,13 @@ const ORDER_DETAIL_FIELDS = `
   name
   total
   subtotal
-  total_price
-  total_shipping
-  total_discounts
-  total_tax
+  shipping
+  discount_value
+  refunded_amount
+  net_payment
+  paid_by_customer
+  original_total
+  currency
   fulfillment_status
   financial_status
   customer {
@@ -112,33 +117,32 @@ const ORDER_DETAIL_FIELDS = `
     full_name
     email
     phone
-    address1
-    address2
-    city
-    country
-    zip
   }
-  line_items {
+  items {
     id
     _id
     title
-    quantity
+    sku
     price
+    fulfillment_status
+    financial_status
+    tracking_number
+    tracking_link
+    carrier
   }
   shipping_address {
     first_name
     last_name
-    address1
-    address2
+    line1
+    line2
     city
     country
     zip
     phone
   }
-  note
+  notes
   tags
   cancelled_at
-  date
   test
   created_at
   updated_at
@@ -217,15 +221,18 @@ const PRODUCT_DETAIL_FIELDS = `
   id
   _id
   title
+  slug
   description
   notice_text
   price
   compare_at_price
   product_type
+  sku
+  enable_inventory_limit
+  inventory_quantity
   images {
     id
     path(version: version1)
-    title
   }
   variants {
     id
@@ -233,8 +240,6 @@ const PRODUCT_DETAIL_FIELDS = `
     title
     price
     sku
-    weight
-    inventory_quantity
   }
   created_at
   updated_at
@@ -315,6 +320,10 @@ const FUNNEL_DETAIL_FIELDS = `
   active_facebook_pixels
   active_tiktok_pixels
   active_snapchat_pixels
+  active_pinterest_pixels
+  active_google_ads_pixels
+  currency
+  currency_format
   created_at
   updated_at
 `;
@@ -396,12 +405,20 @@ const CUSTOMER_DETAIL_FIELDS = `
   avatar
   expenses
   orders_count
-  address1
-  address2
-  city
-  country
-  zip
-  state
+  accepts_marketing
+  notes
+  tags
+  shipping_address {
+    first_name
+    last_name
+    line1
+    line2
+    city
+    country
+    zip
+    state
+    phone
+  }
   created_at
   updated_at
 `;
@@ -467,9 +484,16 @@ const getAccountSettings = tool({
     return client.query(
       `query AccountSettings {
         account {
+          account_name
+          email
+          store_currency
+          store_currency_format
+          timezone
           facebook_pixels { label value }
           snapchat_pixels { label value }
           tiktok_pixels { label value }
+          pinterest_pixels { label value }
+          google_ads_pixels { label value }
         }
       }`,
     );
@@ -483,56 +507,45 @@ const getAccountSettings = tool({
 interface OrderNode {
   _id: number;
   total: number;
+  subtotal: number;
+  shipping: number;
+  currency: string;
   fulfillment_status: string;
   financial_status: string;
-  customer?: { full_name?: string; country?: string };
+  customer?: { full_name?: string };
   cancelled_at: string | null;
   created_at: string;
-  date: string;
   test: boolean;
 }
 
 const summarizeOrders = tool({
   name: "lf_summarize_orders",
   description:
-    "Aggregate order analytics over a date range. Fetches all orders in the range and computes: total orders, total sales, average order value, breakdown by fulfillment status and financial status. Set `bucket` to 'day', 'week', or 'month' to get a time-series. Automatically paginates through all results.",
+    "Aggregate order analytics. Fetches recent orders (newest first) and computes: total orders, total sales, average order value, breakdown by fulfillment status, financial status, and currency. Note: Lightfunnels returns `created_at` as a relative string (e.g. '3 days ago'), so date-range filtering is approximate. Use `max_pages` to control how many orders to include.",
   inputSchema: z.object({
-    since: z
-      .string()
-      .optional()
-      .describe("Start date (ISO 8601, e.g. '2025-01-01'). Defaults to 30 days ago."),
-    until: z
-      .string()
-      .optional()
-      .describe("End date (ISO 8601, e.g. '2025-01-31'). Defaults to today."),
-    bucket: z
-      .enum(["day", "week", "month"])
-      .optional()
-      .describe("Time bucket for series breakdown."),
     max_pages: z
       .number()
       .int()
       .min(1)
       .max(200)
       .optional()
-      .default(50)
-      .describe("Max pages to fetch (25 orders per page). Default 50 = up to 1250 orders."),
+      .default(20)
+      .describe("Max pages to fetch (25 orders per page). Default 20 = up to 500 orders."),
+    query: z
+      .string()
+      .optional()
+      .default("order_by:id order_dir:desc")
+      .describe("Filter/sort string passed to the orders query."),
   }),
   handler: async (input, client) => {
-    const now = new Date();
-    const sinceDate = input.since
-      ? new Date(input.since)
-      : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const untilDate = input.until ? new Date(input.until) : now;
-
     const allOrders: OrderNode[] = [];
     let cursor: string | undefined;
     let page = 0;
-    const maxPages = input.max_pages ?? 50;
+    const maxPages = input.max_pages ?? 20;
 
     while (page < maxPages) {
       const variables: Record<string, unknown> = {
-        query: "order_by:id order_dir:desc",
+        query: input.query ?? "order_by:id order_dir:desc",
         first: 25,
       };
       if (cursor) variables.after = cursor;
@@ -544,12 +557,14 @@ const summarizeOrders = tool({
               node {
                 _id
                 total
+                subtotal
+                shipping
+                currency
                 fulfillment_status
                 financial_status
                 customer { full_name }
                 cancelled_at
                 created_at
-                date
                 test
               }
               cursor
@@ -563,108 +578,68 @@ const summarizeOrders = tool({
       const edges = result.orders.edges;
       if (!edges.length) break;
 
-      let reachedEnd = false;
       for (const edge of edges) {
         const order = edge.node;
-        if (order.test) continue;
-
-        const createdAt = new Date(order.created_at);
-        if (createdAt < sinceDate) {
-          reachedEnd = true;
-          break;
-        }
-        if (createdAt <= untilDate) {
+        if (!order.test) {
           allOrders.push(order);
         }
       }
 
-      if (reachedEnd || !result.orders.pageInfo.hasNextPage) break;
+      if (!result.orders.pageInfo.hasNextPage) break;
       cursor = result.orders.pageInfo.endCursor ?? undefined;
       page++;
     }
 
     const totalOrders = allOrders.length;
     const totalSales = allOrders.reduce((sum, o) => sum + (o.total ?? 0), 0);
+    const totalSubtotal = allOrders.reduce((sum, o) => sum + (o.subtotal ?? 0), 0);
+    const totalShipping = allOrders.reduce((sum, o) => sum + (o.shipping ?? 0), 0);
     const avgOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0;
 
     const byFulfillment: Record<string, number> = {};
     const byFinancial: Record<string, number> = {};
+    const byCurrency: Record<string, { orders: number; sales: number }> = {};
     let cancelledCount = 0;
 
     for (const order of allOrders) {
       const fs = order.fulfillment_status || "unknown";
       byFulfillment[fs] = (byFulfillment[fs] ?? 0) + 1;
+
       const fin = order.financial_status || "unknown";
       byFinancial[fin] = (byFinancial[fin] ?? 0) + 1;
+
+      const cur = order.currency || "unknown";
+      const curEntry = byCurrency[cur] ?? { orders: 0, sales: 0 };
+      curEntry.orders++;
+      curEntry.sales += order.total ?? 0;
+      byCurrency[cur] = curEntry;
+
       if (order.cancelled_at) cancelledCount++;
     }
 
-    const summary: Record<string, unknown> = {
-      period: {
-        since: sinceDate.toISOString().slice(0, 10),
-        until: untilDate.toISOString().slice(0, 10),
-      },
+    const oldestCreatedAt = allOrders.length > 0
+      ? allOrders[allOrders.length - 1].created_at
+      : null;
+    const newestCreatedAt = allOrders.length > 0
+      ? allOrders[0].created_at
+      : null;
+
+    return {
       total_orders: totalOrders,
       total_sales: Math.round(totalSales * 100) / 100,
+      total_subtotal: Math.round(totalSubtotal * 100) / 100,
+      total_shipping: Math.round(totalShipping * 100) / 100,
       average_order_value: Math.round(avgOrderValue * 100) / 100,
       cancelled_orders: cancelledCount,
       by_fulfillment_status: byFulfillment,
       by_financial_status: byFinancial,
+      by_currency: byCurrency,
+      oldest_order_created_at: oldestCreatedAt,
+      newest_order_created_at: newestCreatedAt,
       pages_fetched: page + 1,
     };
-
-    if (input.bucket) {
-      const series = buildTimeSeries(allOrders, input.bucket, sinceDate, untilDate);
-      summary.series = series;
-    }
-
-    return summary;
   },
 });
-
-function bucketKey(date: Date, bucket: "day" | "week" | "month"): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-
-  switch (bucket) {
-    case "day":
-      return `${y}-${m}-${d}`;
-    case "week": {
-      const day = date.getDay();
-      const monday = new Date(date);
-      monday.setDate(date.getDate() - ((day + 6) % 7));
-      return `${monday.getFullYear()}-W${String(Math.ceil(((monday.getTime() - new Date(monday.getFullYear(), 0, 1).getTime()) / 86400000 + 1) / 7)).padStart(2, "0")}`;
-    }
-    case "month":
-      return `${y}-${m}`;
-  }
-}
-
-function buildTimeSeries(
-  orders: OrderNode[],
-  bucket: "day" | "week" | "month",
-  _since: Date,
-  _until: Date,
-): Array<{ period: string; orders: number; sales: number }> {
-  const map = new Map<string, { orders: number; sales: number }>();
-
-  for (const order of orders) {
-    const key = bucketKey(new Date(order.created_at), bucket);
-    const entry = map.get(key) ?? { orders: 0, sales: 0 };
-    entry.orders++;
-    entry.sales += order.total ?? 0;
-    map.set(key, entry);
-  }
-
-  return Array.from(map.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([period, data]) => ({
-      period,
-      orders: data.orders,
-      sales: Math.round(data.sales * 100) / 100,
-    }));
-}
 
 /* -------------------------------------------------------------------------- */
 /*  Raw GraphQL query (escape hatch)                                          */
