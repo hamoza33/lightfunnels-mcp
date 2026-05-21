@@ -61,7 +61,7 @@ async function main(): Promise<void> {
   const oauth = new LfMcpOAuthProvider(adminToken);
 
   const app = express();
-  app.set("trust proxy", true);
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "4mb" }));
   app.use(express.urlencoded({ extended: false, limit: "256kb" }));
 
