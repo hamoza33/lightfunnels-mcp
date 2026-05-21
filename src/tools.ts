@@ -91,6 +91,19 @@ const ORDER_FIELDS = `
     email
     phone
   }
+  utm {
+    k
+    v
+  }
+  checkout {
+    funnel {
+      name
+      slug
+      preferred_domain {
+        name
+      }
+    }
+  }
   cancelled_at
   test
   created_at(format: "YYYY-MM-DDTHH:mm:ss")
@@ -157,6 +170,19 @@ const ORDER_DETAIL_FIELDS = `
     country
     zip
     phone
+  }
+  utm {
+    k
+    v
+  }
+  checkout {
+    funnel {
+      name
+      slug
+      preferred_domain {
+        name
+      }
+    }
   }
   notes
   tags
@@ -532,6 +558,8 @@ interface OrderNode {
   financial_status: string;
   funnel_id: string | null;
   customer?: { full_name?: string };
+  utm?: { k: string; v: string }[] | null;
+  checkout?: { funnel?: { name: string; slug: string; preferred_domain?: { name: string } | null } | null } | null;
   cancelled_at: string | null;
   created_at: string;
   test: boolean;
@@ -594,6 +622,14 @@ const summarizeOrders = tool({
                 financial_status
                 funnel_id
                 customer { full_name }
+                utm { k v }
+                checkout {
+                  funnel {
+                    name
+                    slug
+                    preferred_domain { name }
+                  }
+                }
                 cancelled_at
                 created_at(format: "YYYY-MM-DDTHH:mm:ss")
                 test
@@ -637,7 +673,8 @@ const summarizeOrders = tool({
     const byFulfillment: Record<string, number> = {};
     const byFinancial: Record<string, number> = {};
     const byCurrency: Record<string, { orders: number; sales: number }> = {};
-    const byFunnel: Record<string, { orders: number; sales: number }> = {};
+    const byFunnel: Record<string, { orders: number; sales: number; url: string }> = {};
+    const bySource: Record<string, { orders: number; sales: number }> = {};
     let cancelledCount = 0;
 
     for (const order of allOrders) {
@@ -653,11 +690,23 @@ const summarizeOrders = tool({
       curEntry.sales += order.total ?? 0;
       byCurrency[cur] = curEntry;
 
-      const funnelId = order.funnel_id || "unknown";
-      const funnelEntry = byFunnel[funnelId] ?? { orders: 0, sales: 0 };
+      // Funnel breakdown with URL
+      const funnel = order.checkout?.funnel;
+      const funnelName = funnel?.name || order.funnel_id || "unknown";
+      const funnelUrl = funnel?.preferred_domain?.name && funnel?.slug
+        ? `https://${funnel.preferred_domain.name}/${funnel.slug}`
+        : "";
+      const funnelEntry = byFunnel[funnelName] ?? { orders: 0, sales: 0, url: funnelUrl };
       funnelEntry.orders++;
       funnelEntry.sales += order.total ?? 0;
-      byFunnel[funnelId] = funnelEntry;
+      byFunnel[funnelName] = funnelEntry;
+
+      // UTM source breakdown
+      const utmSource = order.utm?.find(u => u.k === "source")?.v || "direct";
+      const sourceEntry = bySource[utmSource] ?? { orders: 0, sales: 0 };
+      sourceEntry.orders++;
+      sourceEntry.sales += order.total ?? 0;
+      bySource[utmSource] = sourceEntry;
 
       if (order.cancelled_at) cancelledCount++;
     }
@@ -680,6 +729,7 @@ const summarizeOrders = tool({
       by_financial_status: byFinancial,
       by_currency: byCurrency,
       by_funnel: byFunnel,
+      by_source: bySource,
       oldest_order_created_at: oldestCreatedAt,
       newest_order_created_at: newestCreatedAt,
       pages_fetched: page + 1,
@@ -742,6 +792,8 @@ const fetchAllOrders = tool({
       customer: { id: string; _id: number; full_name: string; email: string; phone: string } | null;
       shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
       items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
+      utm: { k: string; v: string }[] | null;
+      checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
       cancelled_at: string | null;
       test: boolean;
       created_at: string;
@@ -809,6 +861,19 @@ const fetchAllOrders = tool({
                     sku
                     price
                     product_id
+                  }
+                }
+                utm {
+                  k
+                  v
+                }
+                checkout {
+                  funnel {
+                    name
+                    slug
+                    preferred_domain {
+                      name
+                    }
                   }
                 }
                 cancelled_at
