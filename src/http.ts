@@ -65,6 +65,11 @@ async function main(): Promise<void> {
   app.use(express.json({ limit: "4mb" }));
   app.use(express.urlencoded({ extended: false, limit: "256kb" }));
 
+  app.use((req, _res, next) => {
+    log(`${req.method} ${req.path} [${req.ip}] auth=${req.header("authorization")?.slice(0, 20) ?? "none"}`);
+    next();
+  });
+
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true });
   });
