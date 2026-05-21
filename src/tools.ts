@@ -10,6 +10,90 @@ import { z } from "zod";
 import type { LfClient } from "./client.js";
 
 /* -------------------------------------------------------------------------- */
+/*  Phone number normalization                                                */
+/* -------------------------------------------------------------------------- */
+
+const COUNTRY_CODES: Record<string, { code: string; localLen: number }> = {
+  SA: { code: "966", localLen: 9 },
+  AE: { code: "971", localLen: 9 },
+  KW: { code: "965", localLen: 8 },
+  BH: { code: "973", localLen: 8 },
+  QA: { code: "974", localLen: 8 },
+  OM: { code: "968", localLen: 8 },
+  EG: { code: "20", localLen: 10 },
+  MA: { code: "212", localLen: 9 },
+  DZ: { code: "213", localLen: 9 },
+  TN: { code: "216", localLen: 8 },
+  JO: { code: "962", localLen: 9 },
+  IQ: { code: "964", localLen: 10 },
+  LB: { code: "961", localLen: 8 },
+};
+
+function normalizePhone(raw: string | null | undefined, countryCode?: string): string {
+  if (!raw) return "";
+  // Strip spaces, dashes, dots, parentheses
+  let phone = raw.replace(/[\s\-.()+]/g, "");
+  // If it's not digits (e.g. Arabic text), return as-is
+  if (!/^\d+$/.test(phone)) return raw;
+
+  // Strip leading zeros
+  phone = phone.replace(/^0+/, "");
+
+  const country = countryCode?.toUpperCase();
+  const info = country ? COUNTRY_CODES[country] : undefined;
+
+  if (info) {
+    const { code, localLen } = info;
+    // Remove repeated country code prefix (e.g. "966966555..." or "971971...")
+    const doubleCode = code + code;
+    if (phone.startsWith(doubleCode)) {
+      phone = phone.slice(code.length);
+    }
+    // If starts with country code already, validate
+    if (phone.startsWith(code)) {
+      const local = phone.slice(code.length);
+      // Remove leading zero from local part if present
+      const cleanLocal = local.replace(/^0+/, "");
+      if (cleanLocal.length === localLen) {
+        return code + cleanLocal;
+      }
+      // If local part is slightly off, still return with code
+      return code + cleanLocal;
+    }
+    // Local number without country code — add it
+    if (phone.length === localLen) {
+      return code + phone;
+    }
+    // Local with leading zero stripped already but length matches
+    if (phone.length === localLen + 1 && phone.startsWith("0")) {
+      return code + phone.slice(1);
+    }
+    // Best effort: add country code
+    return code + phone;
+  }
+
+  // No country info — just return digits without leading zeros
+  return phone;
+}
+
+interface OrderWithPhone {
+  customer?: { phone?: string; [k: string]: unknown } | null;
+  shipping_address?: { phone?: string; country?: string; [k: string]: unknown } | null;
+  [k: string]: unknown;
+}
+
+function normalizeOrderPhones<T extends OrderWithPhone>(order: T): T {
+  const country = (order.shipping_address?.country as string) || undefined;
+  if (order.customer?.phone) {
+    order.customer.phone = normalizePhone(order.customer.phone, country);
+  }
+  if (order.shipping_address?.phone) {
+    order.shipping_address.phone = normalizePhone(order.shipping_address.phone, country);
+  }
+  return order;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Tool registry                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -89,6 +173,10 @@ const ORDER_FIELDS = `
     _id
     full_name
     email
+    phone
+  }
+  shipping_address {
+    country
     phone
   }
   utm {
@@ -211,7 +299,7 @@ const listOrders = tool({
     if (input.first) variables.first = input.first;
     if (input.after) variables.after = input.after;
 
-    return client.query<{ orders: Connection<unknown> }>(
+    const result = await client.query<{ orders: Connection<OrderWithPhone> }>(
       `query ListOrders($first: Int, $after: String, $query: String!) {
         orders(query: $query, first: $first, after: $after) {
           edges {
@@ -223,6 +311,10 @@ const listOrders = tool({
       }`,
       variables,
     );
+    for (const edge of result.orders.edges) {
+      normalizeOrderPhones(edge.node);
+    }
+    return result;
   },
 });
 
@@ -233,7 +325,7 @@ const getOrder = tool({
     id: z.string().describe("The order ID (e.g. 'order_T3JkZXI6MTgyNTE0')."),
   }),
   handler: async (input, client) => {
-    return client.query(
+    const result = await client.query<{ node: OrderWithPhone }>(
       `query GetOrder($id: ID!) {
         node(id: $id) {
           ... on Order { ${ORDER_DETAIL_FIELDS} }
@@ -241,6 +333,8 @@ const getOrder = tool({
       }`,
       { id: input.id },
     );
+    normalizeOrderPhones(result.node);
+    return result;
   },
 });
 
@@ -903,6 +997,7 @@ const fetchAllOrders = tool({
         }
         if (untilDate && orderDate > untilDate) continue;
 
+        normalizeOrderPhones(order as unknown as OrderWithPhone);
         allOrders.push(order);
       }
 
