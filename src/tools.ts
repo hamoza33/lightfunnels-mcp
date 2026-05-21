@@ -836,13 +836,106 @@ const summarizeOrders = tool({
 });
 
 /* -------------------------------------------------------------------------- */
-/*  Fetch all orders (paginated, with date & product filter)                  */
+/*  Fetch orders in fast cursor-based chunks                                  */
 /* -------------------------------------------------------------------------- */
+
+const FETCH_ORDER_GQL = `query FetchOrders($first: Int, $after: String, $query: String!) {
+  orders(query: $query, first: $first, after: $after) {
+    edges {
+      node {
+        id
+        _id
+        name
+        total
+        subtotal
+        shipping
+        currency
+        fulfillment_status
+        financial_status
+        funnel_id
+        customer {
+          id
+          _id
+          full_name
+          email
+          phone
+        }
+        shipping_address {
+          first_name
+          last_name
+          line1
+          line2
+          city
+          country
+          zip
+          phone
+        }
+        items {
+          ... on VariantSnapshot {
+            _id
+            title
+            sku
+            price
+            product_id
+          }
+          ... on OrderBumpSnapshot {
+            _id
+            title
+            sku
+            price
+            product_id
+          }
+        }
+        utm {
+          k
+          v
+        }
+        checkout {
+          funnel {
+            name
+            slug
+            preferred_domain {
+              name
+            }
+          }
+        }
+        cancelled_at
+        test
+        created_at(format: "YYYY-MM-DDTHH:mm:ss")
+        updated_at(format: "YYYY-MM-DDTHH:mm:ss")
+      }
+      cursor
+    }
+    pageInfo { endCursor hasNextPage }
+  }
+}`;
+
+interface FetchOrderNode {
+  id: string;
+  _id: number;
+  name: string;
+  total: number;
+  subtotal: number;
+  shipping: number;
+  currency: string;
+  fulfillment_status: string;
+  financial_status: string;
+  funnel_id: string | null;
+  customer: { id: string; _id: number; full_name: string; email: string; phone: string } | null;
+  shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
+  items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
+  utm: { k: string; v: string }[] | null;
+  checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
+  cancelled_at: string | null;
+  test: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 const fetchAllOrders = tool({
   name: "lf_fetch_all_orders",
   description:
-    "Fetch ALL orders matching filters, paginating automatically. Returns every order with full details including funnel_id, customer phone, and ISO timestamps. Use this when you need the complete list of orders (not just a summary). Supports date range and product filtering.",
+    "Fetch orders with full details using fast cursor-based pagination. Each call fetches one batch directly from the API (no re-fetching). Pass next_cursor from the previous response to get the next batch. Includes funnel URL, UTM attribution, normalized phone numbers. For writing to sheets, use limit:50. For dashboards, use limit:100-200 or use lf_summarize_orders for pre-computed analytics.",
   inputSchema: z.object({
     query: z
       .string()
@@ -852,19 +945,23 @@ const fetchAllOrders = tool({
     since_date: z
       .string()
       .optional()
-      .describe("Only include orders created on or after this date (ISO YYYY-MM-DD)."),
+      .describe("Only include orders created on or after this date (ISO YYYY-MM-DD). Orders before this date are excluded and pagination stops."),
     until_date: z
       .string()
       .optional()
       .describe("Only include orders created on or before this date (ISO YYYY-MM-DD)."),
-    max_pages: z
+    limit: z
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(100)
       .optional()
-      .default(100)
-      .describe("Max pages (100 orders/page). Default 100 = up to 10,000 orders."),
+      .default(50)
+      .describe("Orders per batch (default 50, max 100). Use 50 for sheets, 100 for dashboards."),
+    cursor: z
+      .string()
+      .optional()
+      .describe("Cursor from previous response's next_cursor to continue pagination. Omit for first call."),
     include_test: z
       .boolean()
       .optional()
@@ -872,121 +969,35 @@ const fetchAllOrders = tool({
       .describe("Include test orders (default: false)."),
   }),
   handler: async (input, client) => {
-    interface FullOrderNode {
-      id: string;
-      _id: number;
-      name: string;
-      total: number;
-      subtotal: number;
-      shipping: number;
-      currency: string;
-      fulfillment_status: string;
-      financial_status: string;
-      funnel_id: string | null;
-      customer: { id: string; _id: number; full_name: string; email: string; phone: string } | null;
-      shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
-      items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
-      utm: { k: string; v: string }[] | null;
-      checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
-      cancelled_at: string | null;
-      test: boolean;
-      created_at: string;
-      updated_at: string;
-    }
-
-    const allOrders: FullOrderNode[] = [];
-    let cursor: string | undefined;
-    let page = 0;
-    const maxPages = input.max_pages ?? 100;
+    const orders: FetchOrderNode[] = [];
+    const limit = input.limit ?? 50;
     const sinceDate = input.since_date ? new Date(input.since_date) : null;
     const untilDate = input.until_date ? new Date(input.until_date + "T23:59:59") : null;
+    let apiCursor: string | undefined = input.cursor;
+    let reachedEnd = false;
     let reachedBeforeSince = false;
 
-    while (page < maxPages && !reachedBeforeSince) {
+    // Fetch from API in pages until we have enough orders or hit the date boundary
+    while (orders.length < limit && !reachedEnd && !reachedBeforeSince) {
       const variables: Record<string, unknown> = {
         query: input.query ?? "order_by:created_at order_dir:desc",
         first: 100,
       };
-      if (cursor) variables.after = cursor;
+      if (apiCursor) variables.after = apiCursor;
 
-      const result = await client.query<{ orders: Connection<FullOrderNode> }>(
-        `query FetchAllOrders($first: Int, $after: String, $query: String!) {
-          orders(query: $query, first: $first, after: $after) {
-            edges {
-              node {
-                id
-                _id
-                name
-                total
-                subtotal
-                shipping
-                currency
-                fulfillment_status
-                financial_status
-                funnel_id
-                customer {
-                  id
-                  _id
-                  full_name
-                  email
-                  phone
-                }
-                shipping_address {
-                  first_name
-                  last_name
-                  line1
-                  line2
-                  city
-                  country
-                  zip
-                  phone
-                }
-                items {
-                  ... on VariantSnapshot {
-                    _id
-                    title
-                    sku
-                    price
-                    product_id
-                  }
-                  ... on OrderBumpSnapshot {
-                    _id
-                    title
-                    sku
-                    price
-                    product_id
-                  }
-                }
-                utm {
-                  k
-                  v
-                }
-                checkout {
-                  funnel {
-                    name
-                    slug
-                    preferred_domain {
-                      name
-                    }
-                  }
-                }
-                cancelled_at
-                test
-                created_at(format: "YYYY-MM-DDTHH:mm:ss")
-                updated_at(format: "YYYY-MM-DDTHH:mm:ss")
-              }
-              cursor
-            }
-            pageInfo { endCursor hasNextPage }
-          }
-        }`,
+      const result = await client.query<{ orders: Connection<FetchOrderNode> }>(
+        FETCH_ORDER_GQL,
         variables,
       );
 
       const edges = result.orders.edges;
-      if (!edges.length) break;
+      if (!edges.length) {
+        reachedEnd = true;
+        break;
+      }
 
       for (const edge of edges) {
+        if (orders.length >= limit) break;
         const order = edge.node;
         if (!input.include_test && order.test) continue;
 
@@ -998,18 +1009,24 @@ const fetchAllOrders = tool({
         if (untilDate && orderDate > untilDate) continue;
 
         normalizeOrderPhones(order as unknown as OrderWithPhone);
-        allOrders.push(order);
+        orders.push(order);
       }
 
-      if (!result.orders.pageInfo.hasNextPage) break;
-      cursor = result.orders.pageInfo.endCursor ?? undefined;
-      page++;
+      if (!result.orders.pageInfo.hasNextPage) {
+        reachedEnd = true;
+      } else {
+        apiCursor = result.orders.pageInfo.endCursor ?? undefined;
+      }
     }
 
+    const done = reachedEnd || reachedBeforeSince;
+
     return {
-      total_count: allOrders.length,
+      returned: orders.length,
+      has_more: !done,
+      next_cursor: !done ? apiCursor ?? null : null,
       date_filter: { since: input.since_date ?? null, until: input.until_date ?? null },
-      orders: allOrders,
+      orders,
     };
   },
 });
