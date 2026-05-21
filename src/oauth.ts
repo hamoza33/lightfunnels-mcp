@@ -170,10 +170,17 @@ export class LfMcpOAuthProvider implements OAuthServerProvider {
   };
 
   async challengeForAuthorizationCode(
-    _client: OAuthClientInformationFull,
-    _authorizationCode: string,
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
   ): Promise<string> {
-    return "consent";
+    const rec = this.codes.get(authorizationCode);
+    if (!rec || rec.expiresAt < Date.now()) {
+      throw new InvalidGrantError("Authorization code expired or invalid");
+    }
+    if (rec.client.client_id !== client.client_id) {
+      throw new InvalidGrantError("Client mismatch");
+    }
+    return rec.params.codeChallenge;
   }
 
   async exchangeAuthorizationCode(
