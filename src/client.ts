@@ -7,6 +7,7 @@ const DEFAULT_BASE_URL = "https://services.lightfunnels.com/api/v2";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const TRANSIENT_STATUSES = new Set([502, 503, 504]);
 const TRANSIENT_RETRY_BACKOFF_MS = [400, 1200];
+const RATE_LIMIT_RETRY_BACKOFF_MS = [2000, 4000, 8000];
 
 export interface LfClientOptions {
   /** Permanent OAuth access token from Lightfunnels. */
@@ -55,7 +56,7 @@ export class LfClient {
     variables?: Record<string, unknown>,
   ): Promise<T> {
     let attempt = 0;
-    const maxAttempts = TRANSIENT_RETRY_BACKOFF_MS.length + 1;
+    const maxAttempts = Math.max(TRANSIENT_RETRY_BACKOFF_MS.length, RATE_LIMIT_RETRY_BACKOFF_MS.length) + 1;
     let lastErr: unknown;
 
     while (attempt < maxAttempts) {
@@ -63,15 +64,27 @@ export class LfClient {
         return await this.rawQuery<T>(gql, variables);
       } catch (err) {
         lastErr = err;
-        if (
-          err instanceof LfApiError &&
-          (TRANSIENT_STATUSES.has(err.status) || err.status === 0) &&
-          attempt < TRANSIENT_RETRY_BACKOFF_MS.length
-        ) {
-          const wait = TRANSIENT_RETRY_BACKOFF_MS[attempt] ?? 1000;
-          await new Promise((resolve) => setTimeout(resolve, wait));
-          attempt += 1;
-          continue;
+        if (err instanceof LfApiError) {
+          // Rate limit: retry with longer backoff
+          const isRateLimit = err.errors?.some(
+            (e) => typeof e === "object" && e !== null && (e as Record<string, unknown>).key === "rate_limit_reached",
+          );
+          if (isRateLimit && attempt < RATE_LIMIT_RETRY_BACKOFF_MS.length) {
+            const wait = RATE_LIMIT_RETRY_BACKOFF_MS[attempt] ?? 4000;
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            attempt += 1;
+            continue;
+          }
+          // Transient HTTP errors
+          if (
+            (TRANSIENT_STATUSES.has(err.status) || err.status === 0) &&
+            attempt < TRANSIENT_RETRY_BACKOFF_MS.length
+          ) {
+            const wait = TRANSIENT_RETRY_BACKOFF_MS[attempt] ?? 1000;
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            attempt += 1;
+            continue;
+          }
         }
         throw err;
       }

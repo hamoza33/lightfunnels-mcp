@@ -83,6 +83,7 @@ const ORDER_FIELDS = `
   currency
   fulfillment_status
   financial_status
+  funnel_id
   customer {
     id
     _id
@@ -92,8 +93,8 @@ const ORDER_FIELDS = `
   }
   cancelled_at
   test
-  created_at
-  updated_at
+  created_at(format: "YYYY-MM-DDTHH:mm:ss")
+  updated_at(format: "YYYY-MM-DDTHH:mm:ss")
 `;
 
 const ORDER_DETAIL_FIELDS = `
@@ -111,6 +112,7 @@ const ORDER_DETAIL_FIELDS = `
   currency
   fulfillment_status
   financial_status
+  funnel_id
   customer {
     id
     _id
@@ -119,16 +121,32 @@ const ORDER_DETAIL_FIELDS = `
     phone
   }
   items {
-    id
-    _id
-    title
-    sku
-    price
-    fulfillment_status
-    financial_status
-    tracking_number
-    tracking_link
-    carrier
+    ... on VariantSnapshot {
+      id
+      _id
+      title
+      sku
+      price
+      product_id
+      fulfillment_status
+      financial_status
+      tracking_number
+      tracking_link
+      carrier
+    }
+    ... on OrderBumpSnapshot {
+      id
+      _id
+      title
+      sku
+      price
+      product_id
+      fulfillment_status
+      financial_status
+      tracking_number
+      tracking_link
+      carrier
+    }
   }
   shipping_address {
     first_name
@@ -144,21 +162,21 @@ const ORDER_DETAIL_FIELDS = `
   tags
   cancelled_at
   test
-  created_at
-  updated_at
+  created_at(format: "YYYY-MM-DDTHH:mm:ss")
+  updated_at(format: "YYYY-MM-DDTHH:mm:ss")
 `;
 
 const listOrders = tool({
   name: "lf_list_orders",
   description:
-    "List orders with pagination. Supports filtering by status, financial_status, fulfillment_status, created_at, and product_id via the query string. Example query: 'order_by:id order_dir:desc status:active'.",
+    "List orders with pagination. Returns ISO timestamps and funnel_id for each order. Supports filtering by status, financial_status, fulfillment_status, and product_id via the query string. Example: 'order_by:created_at order_dir:desc product_id:prod_abc123'. For fetching ALL orders with date filtering, use lf_fetch_all_orders instead.",
   inputSchema: z.object({
     query: z
       .string()
       .optional()
-      .default("order_by:id order_dir:desc")
+      .default("order_by:created_at order_dir:desc")
       .describe(
-        "Filter/sort string. Supported params: order_by, order_dir, status, financial_status, fulfillment_status, created_at, product_id.",
+        "Filter/sort string. Supported params: order_by (id, created_at), order_dir (asc, desc), status, financial_status, fulfillment_status, product_id.",
       ),
     ...PaginationInput,
   }),
@@ -512,6 +530,7 @@ interface OrderNode {
   currency: string;
   fulfillment_status: string;
   financial_status: string;
+  funnel_id: string | null;
   customer?: { full_name?: string };
   cancelled_at: string | null;
   created_at: string;
@@ -521,32 +540,43 @@ interface OrderNode {
 const summarizeOrders = tool({
   name: "lf_summarize_orders",
   description:
-    "Aggregate order analytics. Fetches recent orders (newest first) and computes: total orders, total sales, average order value, breakdown by fulfillment status, financial status, and currency. Note: Lightfunnels returns `created_at` as a relative string (e.g. '3 days ago'), so date-range filtering is approximate. Use `max_pages` to control how many orders to include.",
+    "Aggregate order analytics with date filtering. Fetches orders and computes: total orders, total sales, average order value, breakdown by fulfillment status, financial status, and currency. Supports exact date range filtering via since_date and until_date (ISO format YYYY-MM-DD). Use product_id in the query param to filter by product.",
   inputSchema: z.object({
     max_pages: z
       .number()
       .int()
       .min(1)
-      .max(200)
+      .max(500)
       .optional()
-      .default(20)
-      .describe("Max pages to fetch (25 orders per page). Default 20 = up to 500 orders."),
+      .default(50)
+      .describe("Max pages to fetch (100 orders per page). Default 50 = up to 5000 orders."),
     query: z
       .string()
       .optional()
-      .default("order_by:id order_dir:desc")
-      .describe("Filter/sort string passed to the orders query."),
+      .default("order_by:created_at order_dir:desc")
+      .describe("Filter/sort string passed to the orders query. Use product_id:<id> to filter by product."),
+    since_date: z
+      .string()
+      .optional()
+      .describe("Only include orders created on or after this date (ISO format YYYY-MM-DD, e.g. '2026-04-01')."),
+    until_date: z
+      .string()
+      .optional()
+      .describe("Only include orders created on or before this date (ISO format YYYY-MM-DD, e.g. '2026-05-21')."),
   }),
   handler: async (input, client) => {
     const allOrders: OrderNode[] = [];
     let cursor: string | undefined;
     let page = 0;
-    const maxPages = input.max_pages ?? 20;
+    const maxPages = input.max_pages ?? 50;
+    const sinceDate = input.since_date ? new Date(input.since_date) : null;
+    const untilDate = input.until_date ? new Date(input.until_date + "T23:59:59") : null;
+    let reachedBeforeSince = false;
 
-    while (page < maxPages) {
+    while (page < maxPages && !reachedBeforeSince) {
       const variables: Record<string, unknown> = {
-        query: input.query ?? "order_by:id order_dir:desc",
-        first: 25,
+        query: input.query ?? "order_by:created_at order_dir:desc",
+        first: 100,
       };
       if (cursor) variables.after = cursor;
 
@@ -562,9 +592,10 @@ const summarizeOrders = tool({
                 currency
                 fulfillment_status
                 financial_status
+                funnel_id
                 customer { full_name }
                 cancelled_at
-                created_at
+                created_at(format: "YYYY-MM-DDTHH:mm:ss")
                 test
               }
               cursor
@@ -580,9 +611,16 @@ const summarizeOrders = tool({
 
       for (const edge of edges) {
         const order = edge.node;
-        if (!order.test) {
-          allOrders.push(order);
+        if (order.test) continue;
+
+        const orderDate = new Date(order.created_at);
+        if (sinceDate && orderDate < sinceDate) {
+          reachedBeforeSince = true;
+          break;
         }
+        if (untilDate && orderDate > untilDate) continue;
+
+        allOrders.push(order);
       }
 
       if (!result.orders.pageInfo.hasNextPage) break;
@@ -599,6 +637,7 @@ const summarizeOrders = tool({
     const byFulfillment: Record<string, number> = {};
     const byFinancial: Record<string, number> = {};
     const byCurrency: Record<string, { orders: number; sales: number }> = {};
+    const byFunnel: Record<string, { orders: number; sales: number }> = {};
     let cancelledCount = 0;
 
     for (const order of allOrders) {
@@ -613,6 +652,12 @@ const summarizeOrders = tool({
       curEntry.orders++;
       curEntry.sales += order.total ?? 0;
       byCurrency[cur] = curEntry;
+
+      const funnelId = order.funnel_id || "unknown";
+      const funnelEntry = byFunnel[funnelId] ?? { orders: 0, sales: 0 };
+      funnelEntry.orders++;
+      funnelEntry.sales += order.total ?? 0;
+      byFunnel[funnelId] = funnelEntry;
 
       if (order.cancelled_at) cancelledCount++;
     }
@@ -634,9 +679,177 @@ const summarizeOrders = tool({
       by_fulfillment_status: byFulfillment,
       by_financial_status: byFinancial,
       by_currency: byCurrency,
+      by_funnel: byFunnel,
       oldest_order_created_at: oldestCreatedAt,
       newest_order_created_at: newestCreatedAt,
       pages_fetched: page + 1,
+      date_filter: {
+        since: input.since_date ?? null,
+        until: input.until_date ?? null,
+      },
+    };
+  },
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Fetch all orders (paginated, with date & product filter)                  */
+/* -------------------------------------------------------------------------- */
+
+const fetchAllOrders = tool({
+  name: "lf_fetch_all_orders",
+  description:
+    "Fetch ALL orders matching filters, paginating automatically. Returns every order with full details including funnel_id, customer phone, and ISO timestamps. Use this when you need the complete list of orders (not just a summary). Supports date range and product filtering.",
+  inputSchema: z.object({
+    query: z
+      .string()
+      .optional()
+      .default("order_by:created_at order_dir:desc")
+      .describe("Filter/sort string. Use product_id:<id> to filter by product. Example: 'order_by:created_at order_dir:desc product_id:prod_abc123'."),
+    since_date: z
+      .string()
+      .optional()
+      .describe("Only include orders created on or after this date (ISO YYYY-MM-DD)."),
+    until_date: z
+      .string()
+      .optional()
+      .describe("Only include orders created on or before this date (ISO YYYY-MM-DD)."),
+    max_pages: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .optional()
+      .default(100)
+      .describe("Max pages (100 orders/page). Default 100 = up to 10,000 orders."),
+    include_test: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Include test orders (default: false)."),
+  }),
+  handler: async (input, client) => {
+    interface FullOrderNode {
+      id: string;
+      _id: number;
+      name: string;
+      total: number;
+      subtotal: number;
+      shipping: number;
+      currency: string;
+      fulfillment_status: string;
+      financial_status: string;
+      funnel_id: string | null;
+      customer: { id: string; _id: number; full_name: string; email: string; phone: string } | null;
+      shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
+      items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
+      cancelled_at: string | null;
+      test: boolean;
+      created_at: string;
+      updated_at: string;
+    }
+
+    const allOrders: FullOrderNode[] = [];
+    let cursor: string | undefined;
+    let page = 0;
+    const maxPages = input.max_pages ?? 100;
+    const sinceDate = input.since_date ? new Date(input.since_date) : null;
+    const untilDate = input.until_date ? new Date(input.until_date + "T23:59:59") : null;
+    let reachedBeforeSince = false;
+
+    while (page < maxPages && !reachedBeforeSince) {
+      const variables: Record<string, unknown> = {
+        query: input.query ?? "order_by:created_at order_dir:desc",
+        first: 100,
+      };
+      if (cursor) variables.after = cursor;
+
+      const result = await client.query<{ orders: Connection<FullOrderNode> }>(
+        `query FetchAllOrders($first: Int, $after: String, $query: String!) {
+          orders(query: $query, first: $first, after: $after) {
+            edges {
+              node {
+                id
+                _id
+                name
+                total
+                subtotal
+                shipping
+                currency
+                fulfillment_status
+                financial_status
+                funnel_id
+                customer {
+                  id
+                  _id
+                  full_name
+                  email
+                  phone
+                }
+                shipping_address {
+                  first_name
+                  last_name
+                  line1
+                  line2
+                  city
+                  country
+                  zip
+                  phone
+                }
+                items {
+                  ... on VariantSnapshot {
+                    _id
+                    title
+                    sku
+                    price
+                    product_id
+                  }
+                  ... on OrderBumpSnapshot {
+                    _id
+                    title
+                    sku
+                    price
+                    product_id
+                  }
+                }
+                cancelled_at
+                test
+                created_at(format: "YYYY-MM-DDTHH:mm:ss")
+                updated_at(format: "YYYY-MM-DDTHH:mm:ss")
+              }
+              cursor
+            }
+            pageInfo { endCursor hasNextPage }
+          }
+        }`,
+        variables,
+      );
+
+      const edges = result.orders.edges;
+      if (!edges.length) break;
+
+      for (const edge of edges) {
+        const order = edge.node;
+        if (!input.include_test && order.test) continue;
+
+        const orderDate = new Date(order.created_at);
+        if (sinceDate && orderDate < sinceDate) {
+          reachedBeforeSince = true;
+          break;
+        }
+        if (untilDate && orderDate > untilDate) continue;
+
+        allOrders.push(order);
+      }
+
+      if (!result.orders.pageInfo.hasNextPage) break;
+      cursor = result.orders.pageInfo.endCursor ?? undefined;
+      page++;
+    }
+
+    return {
+      total_count: allOrders.length,
+      date_filter: { since: input.since_date ?? null, until: input.until_date ?? null },
+      orders: allOrders,
     };
   },
 });
@@ -676,5 +889,6 @@ export const tools: ToolDef[] = [
   getCustomer,
   getAccountSettings,
   summarizeOrders,
+  fetchAllOrders,
   rawQuery,
 ];
