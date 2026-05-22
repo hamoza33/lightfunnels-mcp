@@ -10,12 +10,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { LfApiError, LfClient } from "./client.js";
-import { tools } from "./tools.js";
+import { buildTools } from "./tools.js";
+import type { ExportPublisher } from "./publisher.js";
 
 export interface LfConfig {
   token: string;
   baseUrl?: string;
   timeoutMs?: number;
+}
+
+export interface BuildServerOptions {
+  /** Optional publisher enabling the lf_export_orders tool to return file URLs. */
+  publisher?: ExportPublisher | null;
 }
 
 export function readLfConfig(): LfConfig {
@@ -49,7 +55,10 @@ export function readLfConfig(): LfConfig {
   return { token, baseUrl, timeoutMs };
 }
 
-export function buildMcpServer(cfg: LfConfig): {
+export function buildMcpServer(
+  cfg: LfConfig,
+  opts: BuildServerOptions = {},
+): {
   server: Server;
   toolCount: number;
 } {
@@ -58,6 +67,8 @@ export function buildMcpServer(cfg: LfConfig): {
     baseUrl: cfg.baseUrl,
     timeoutMs: cfg.timeoutMs,
   });
+
+  const tools = buildTools({ publisher: opts.publisher ?? null });
 
   const server = new Server(
     { name: "lightfunnels-mcp", version: "0.1.0" },

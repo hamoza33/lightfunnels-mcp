@@ -13,42 +13,103 @@ an LLM can answer questions like:
 - "List all pending orders with phone numbers"
 - "Give me a breakdown of orders by fulfillment status"
 
-## Tools (12 total)
+## Tools (13 total)
 
-| Tool                    | Description                                              |
-| ----------------------- | -------------------------------------------------------- |
-| `lf_list_orders`        | List orders with pagination, ISO dates, and funnel_id    |
-| `lf_get_order`          | Single order with full details, items, shipping address  |
-| `lf_fetch_all_orders`   | **Fetch ALL orders** with date range & product filtering |
-| `lf_list_products`      | List products with pagination                            |
-| `lf_get_product`        | Single product with variants and images                  |
-| `lf_list_funnels`       | List funnels with pagination                             |
-| `lf_get_funnel`         | Single funnel details                                    |
-| `lf_list_customers`     | List customers with pagination                           |
-| `lf_get_customer`       | Single customer details                                  |
-| `lf_account_settings`   | Account settings and tracking pixels                     |
-| `lf_summarize_orders`   | Aggregate analytics with date filtering                  |
-| `lf_raw_query`          | Execute arbitrary GraphQL (escape hatch)                 |
+| Tool                    | Description                                                              |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `lf_list_orders`        | List orders with pagination, ISO dates, and funnel_id                    |
+| `lf_get_order`          | Single order with full details, items, shipping address                  |
+| `lf_fetch_all_orders`   | Fetch one batch of orders (cursor-paginated). Use `lf_export_orders` for full file exports |
+| `lf_export_orders`      | **Export orders to a downloadable xlsx / csv / jsonl file URL** (server-paginates internally) |
+| `lf_list_products`      | List products with pagination                                            |
+| `lf_get_product`        | Single product with variants and images                                  |
+| `lf_list_funnels`       | List funnels with pagination                                             |
+| `lf_get_funnel`         | Single funnel details                                                    |
+| `lf_list_customers`     | List customers with pagination                                           |
+| `lf_get_customer`       | Single customer details                                                  |
+| `lf_account_settings`   | Account settings and tracking pixels                                     |
+| `lf_summarize_orders`   | Aggregate analytics with date filtering                                  |
+| `lf_raw_query`          | Execute arbitrary GraphQL (escape hatch)                                 |
 
 ### Key features
 
 - **ISO timestamps** — all `created_at`/`updated_at` fields return `YYYY-MM-DDTHH:mm:ss` format (not relative strings)
 - **Funnel tracking** — every order includes `funnel_id` so you can attribute sales to funnels
-- **Exact date filtering** — `lf_fetch_all_orders` and `lf_summarize_orders` support `since_date`/`until_date` params
-- **Auto-pagination** — `lf_fetch_all_orders` fetches up to 10,000 orders automatically (100/page × 100 pages)
+- **Exact date filtering** — `lf_fetch_all_orders`, `lf_export_orders`, and `lf_summarize_orders` support `since_date`/`until_date` params
+- **Server-side pagination** — `lf_export_orders` and `lf_summarize_orders` paginate internally so the LLM doesn't have to drive `next_cursor` round trips
+- **File exports** — `lf_export_orders` returns an xlsx/csv/jsonl download URL so 100s–1000s of order rows never have to flow through the chat channel
 - **Rate limit handling** — automatic retry with exponential backoff on API rate limits
+- **Phone normalization** — customer + shipping phone numbers are normalized to canonical digits using the order's country code
 - **Product filtering** — pass `product_id:<id>` in the query string to filter orders by product
 
 ### lf_fetch_all_orders
 
-Use this tool when you need the complete list of orders (not just a page). It:
-- Paginates automatically (100 orders/page, up to 10,000 by default)
-- Filters by exact date range (`since_date`, `until_date` in YYYY-MM-DD format)
-- Filters by product (`product_id:<id>` in query string)
-- Returns full order details: customer info, phone, items, shipping address, funnel_id
-- Stops early once it reaches orders before `since_date` (efficient)
+Returns **one batch** of orders with full details using cursor-based pagination.
+Pass `next_cursor` from the previous response to fetch the next batch. Suitable
+for dashboards or summaries where the client (LLM) processes orders one batch at a
+time.
 
-Example prompt: *"Get all orders for product prod_abc123 since 2026-04-01"*
+**For exporting hundreds of orders into a spreadsheet, use `lf_export_orders`
+instead** — it paginates server-side and never streams the order rows through
+the chat channel.
+
+### lf_export_orders
+
+Exports orders to a downloadable **xlsx, csv, or jsonl** file. The MCP server
+paginates the Lightfunnels API internally, builds the file, and returns a small
+JSON response with a `file_url`. The order rows themselves never flow through
+the MCP/chat channel — this is how you reliably move 100s–1000s of customer
+records into a spreadsheet from ChatGPT, Claude, or any MCP client without
+token bloat or truncation.
+
+Example call (ChatGPT):
+
+```json
+{
+  "name": "lf_export_orders",
+  "arguments": {
+    "query": "order_by:created_at order_dir:desc product_id:prod_abc123",
+    "since_date": "2026-04-01",
+    "until_date": "2026-05-21",
+    "include_test": false,
+    "format": "xlsx",
+    "include_items": true,
+    "include_utm": true,
+    "include_raw_json": false,
+    "normalize_phones": true
+  }
+}
+```
+
+Example response:
+
+```json
+{
+  "file_url": "https://lightfunnels-mcp.fly.dev/files/<random>/lightfunnel_orders_prod_abc123_2026-04-01_2026-05-21_<ts>.xlsx",
+  "file_name": "lightfunnel_orders_prod_abc123_2026-04-01_2026-05-21_<ts>.xlsx",
+  "total_orders": 422,
+  "format": "xlsx",
+  "sheets": ["orders", "line_items", "utm"],
+  "size_bytes": 87431,
+  "expires_at": "2026-05-22T01:17:00.000Z",
+  "truncated": false,
+  "pages_fetched": 5,
+  "date_filter": { "since": "2026-04-01", "until": "2026-05-21" }
+}
+```
+
+Format details:
+- **xlsx** — multi-sheet workbook (`orders`, optional `line_items`, optional `utm`, optional `raw_json`).
+- **csv** — single flat sheet with optional `items_json`, `utm_json`, `raw_json` columns. UTF-8 BOM so Excel opens it cleanly.
+- **jsonl** — one full order JSON object per line.
+
+File hosting:
+- **HTTP mode**: files are kept in memory on the MCP server and served from
+  `GET /files/:id/:filename`. The 32-byte random ID in the URL acts as a bearer
+  token — anyone with the link can download once, until it expires (default 1h,
+  configurable via `ttl_seconds` up to 24h).
+- **stdio mode**: files are written to a temp directory and a `file://` URL is
+  returned (useful for local Claude Desktop / Cursor usage).
 
 ### lf_summarize_orders
 

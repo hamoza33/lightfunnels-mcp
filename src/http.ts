@@ -22,6 +22,7 @@ import {
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { buildMcpServer, readLfConfig } from "./build-server.js";
+import { HttpFileStore } from "./file-store.js";
 import { LfMcpOAuthProvider } from "./oauth.js";
 
 const log = (...args: unknown[]): void => {
@@ -60,6 +61,8 @@ async function main(): Promise<void> {
 
   const oauth = new LfMcpOAuthProvider(adminToken);
 
+  const fileStore = new HttpFileStore({ baseUrl: issuerUrl });
+
   const app = express();
   app.set("trust proxy", 1);
   app.use(express.json({ limit: "4mb" }));
@@ -73,6 +76,10 @@ async function main(): Promise<void> {
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true });
   });
+
+  // File downloads for `lf_export_orders` results. The 32-byte random ID in
+  // the URL path acts as a bearer token — unguessable, TTL-bounded.
+  app.get("/files/:id/:filename", (req, res) => fileStore.serve(req, res));
 
   app.get("/", (_req, res) => {
     res.json({
@@ -124,7 +131,7 @@ async function main(): Promise<void> {
   };
 
   app.post("/mcp", adminOrOauthBearer, async (req, res) => {
-    const { server } = buildMcpServer(cfg);
+    const { server } = buildMcpServer(cfg, { publisher: fileStore });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -142,7 +149,7 @@ async function main(): Promise<void> {
   app.delete("/mcp", adminOrOauthBearer, (_req, res) => methodNotAllowed(res));
 
   app.listen(port, host, () => {
-    const { toolCount } = buildMcpServer(cfg);
+    const { toolCount } = buildMcpServer(cfg, { publisher: fileStore });
     log(
       `Listening on ${host}:${port} — ${toolCount} tools`,
       `| MCP endpoint: ${mcpResourceUrl}`,

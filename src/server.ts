@@ -10,6 +10,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildMcpServer, readLfConfig } from "./build-server.js";
+import { DiskPublisher } from "./publisher.js";
 
 const log = (...args: unknown[]): void => {
   process.stderr.write(`[lightfunnels-mcp] ${args.join(" ")}\n`);
@@ -17,7 +18,8 @@ const log = (...args: unknown[]): void => {
 
 async function main(): Promise<void> {
   const cfg = readLfConfig();
-  const { server, toolCount } = buildMcpServer(cfg);
+  const publisher = new DiskPublisher();
+  const { server, toolCount } = buildMcpServer(cfg, { publisher });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log(`Running (stdio). ${toolCount} tools registered.`);
