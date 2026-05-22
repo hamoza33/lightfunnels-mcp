@@ -35,14 +35,19 @@ const COUNTRY_CODES: Record<string, { code: string; localLen: number }> = {
   LB: { code: "961", localLen: 8 },
 };
 
+// Unicode bidi/format control chars commonly pasted around RTL phone numbers
+// (LRE/RLE/PDF/LRM/RLM/ZWSP/BOM/WJ). Stripped along with whitespace.
+const PHONE_STRIP_CHARS = /[\s\-.()+/,;_\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
+
 function normalizePhone(raw: string | null | undefined, countryCode?: string): string {
   if (!raw) return "";
-  // Strip spaces, dashes, dots, parentheses
-  let phone = raw.replace(/[\s\-.()+]/g, "");
-  // If it's not digits (e.g. Arabic text), return as-is
+  // Strip whitespace, common separators (- . ( ) + / , ; _), and unicode
+  // bidi/format control chars that frequently wrap pasted phone numbers.
+  let phone = raw.replace(PHONE_STRIP_CHARS, "");
+  // If it's not digits (e.g. Arabic text or unparseable), return as-is
   if (!/^\d+$/.test(phone)) return raw;
 
-  // Strip leading zeros
+  // Strip leading zeros (handles both "0XX" and "00XX" prefixes)
   phone = phone.replace(/^0+/, "");
 
   const country = countryCode?.toUpperCase();
@@ -1107,7 +1112,7 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
         .optional()
         .default(true)
         .describe(
-          "Normalize customer + shipping phone numbers to canonical E.164-style digits using the order's country code.",
+          "Normalize customer + shipping phone numbers to canonical digits-only form prefixed with the country code (e.g. 9665XXXXXXXX). Strips spaces, dashes, dots, parentheses, plus signs, slashes, commas, semicolons, underscores, and Unicode bidi/format control characters. Strips leading zeros (so '00966XXX' and '0XX' both work). For supported countries (SA, AE, KW, BH, QA, OM, EG, MA, DZ, TN, JO, IQ, LB) the country code is added when missing.",
         ),
       max_orders: z
         .number()

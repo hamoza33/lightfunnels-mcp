@@ -103,6 +103,10 @@ Format details:
 - **csv** — single flat sheet with optional `items_json`, `utm_json`, `raw_json` columns. UTF-8 BOM so Excel opens it cleanly.
 - **jsonl** — one full order JSON object per line.
 
+The `orders` sheet/columns include a computed `funnel_url` field
+(`https://<funnel_domain>/<funnel_slug>`) so the landing page URL that
+generated each order is available without any post-processing.
+
 File hosting:
 - **HTTP mode**: files are kept in memory on the MCP server and served from
   `GET /files/:id/:filename`. The 32-byte random ID in the URL acts as a bearer

@@ -113,6 +113,7 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "funnel_name", header: "funnel_name", width: 24 },
   { key: "funnel_slug", header: "funnel_slug", width: 24 },
   { key: "funnel_domain", header: "funnel_domain", width: 28 },
+  { key: "funnel_url", header: "funnel_url", width: 48 },
   { key: "customer_id", header: "customer_id", width: 24 },
   { key: "customer_full_name", header: "customer_full_name", width: 24 },
   { key: "customer_email", header: "customer_email", width: 28 },
@@ -131,6 +132,15 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
 
 interface FlatOrderRow {
   [k: string]: unknown;
+}
+
+type ExportFunnel = NonNullable<NonNullable<ExportOrder["checkout"]>["funnel"]>;
+
+function buildFunnelUrl(funnel: ExportFunnel | null | undefined): string {
+  const domain = funnel?.preferred_domain?.name?.trim() ?? "";
+  const slug = funnel?.slug?.trim() ?? "";
+  if (!domain) return "";
+  return slug ? `https://${domain}/${slug}` : `https://${domain}`;
 }
 
 function flattenOrder(order: ExportOrder): FlatOrderRow {
@@ -165,6 +175,7 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     funnel_name: funnel?.name ?? "",
     funnel_slug: funnel?.slug ?? "",
     funnel_domain: funnel?.preferred_domain?.name ?? "",
+    funnel_url: buildFunnelUrl(funnel),
     customer_id: customer?.id ?? "",
     customer_full_name: customer?.full_name ?? "",
     customer_email: customer?.email ?? "",
