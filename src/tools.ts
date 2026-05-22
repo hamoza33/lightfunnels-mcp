@@ -8,6 +8,12 @@
 
 import { z } from "zod";
 import type { LfClient } from "./client.js";
+import {
+  buildExport,
+  type ExportFormat,
+  type ExportOrder,
+} from "./exporter.js";
+import type { ExportPublisher } from "./publisher.js";
 
 /* -------------------------------------------------------------------------- */
 /*  Phone number normalization                                                */
@@ -935,7 +941,7 @@ interface FetchOrderNode {
 const fetchAllOrders = tool({
   name: "lf_fetch_all_orders",
   description:
-    "Fetch orders with full details using fast cursor-based pagination. Each call fetches one batch directly from the API (no re-fetching). Pass next_cursor from the previous response to get the next batch. Includes funnel URL, UTM attribution, normalized phone numbers. For writing to sheets, use limit:50. For dashboards, use limit:100-200 or use lf_summarize_orders for pre-computed analytics.",
+    "Fetch one batch of orders with full details using cursor-based pagination. **This does NOT return all orders in a single call** — pass `next_cursor` from the previous response to fetch the next batch. Includes funnel URL, UTM attribution, normalized phone numbers. For dashboards/summaries use lf_summarize_orders; for full exports of 100s+ orders into a spreadsheet/CSV/JSONL file, use lf_export_orders instead — it paginates server-side and returns a downloadable file URL so order data never has to flow through the chat channel.",
   inputSchema: z.object({
     query: z
       .string()
@@ -1032,6 +1038,237 @@ const fetchAllOrders = tool({
 });
 
 /* -------------------------------------------------------------------------- */
+/*  Export orders to a downloadable file                                      */
+/* -------------------------------------------------------------------------- */
+
+const DEFAULT_EXPORT_MAX_ORDERS = 10000;
+const EXPORT_PAGE_SIZE = 100;
+
+function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
+  return tool({
+    name: "lf_export_orders",
+    description:
+      "Export orders to a downloadable file (xlsx, csv, or jsonl). The MCP server paginates the Lightfunnels API internally, builds the file, and returns ONLY a small JSON response with a `file_url` you can hand back to the user. The order rows themselves never flow through the chat channel — this avoids token bloat and truncation when exporting hundreds of orders. Supports the same `query`, `since_date`, `until_date`, and `include_test` filters as `lf_fetch_all_orders`. The xlsx format produces up to 4 sheets (orders / line_items / utm / raw_json); csv and jsonl produce a single flat file with optional `items_json` / `utm_json` / `raw_json` columns. Phone numbers are normalized by default.",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .optional()
+        .default("order_by:created_at order_dir:desc")
+        .describe(
+          "Filter/sort string passed straight to the Lightfunnels API. Use product_id:<id> to filter by product. Example: 'order_by:created_at order_dir:desc product_id:prod_abc123'.",
+        ),
+      since_date: z
+        .string()
+        .optional()
+        .describe(
+          "Only include orders created on or after this date (ISO YYYY-MM-DD). Pagination stops once older orders are encountered.",
+        ),
+      until_date: z
+        .string()
+        .optional()
+        .describe(
+          "Only include orders created on or before this date (ISO YYYY-MM-DD).",
+        ),
+      include_test: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include test orders (default: false)."),
+      format: z
+        .enum(["xlsx", "csv", "jsonl"])
+        .optional()
+        .default("xlsx")
+        .describe(
+          "Output file format. xlsx = multi-sheet Excel (orders + line_items + utm + raw_json). csv = single flat sheet with optional *_json columns. jsonl = one order per line.",
+        ),
+      include_items: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Include line items. In xlsx this becomes a `line_items` sheet; in csv it becomes an `items_json` column.",
+        ),
+      include_utm: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Include UTM attribution. In xlsx this becomes a `utm` sheet; in csv it becomes a `utm_json` column.",
+        ),
+      include_raw_json: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Include the raw order JSON as an additional sheet (xlsx) or column (csv). Adds substantial size — disabled by default.",
+        ),
+      normalize_phones: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Normalize customer + shipping phone numbers to canonical E.164-style digits using the order's country code.",
+        ),
+      max_orders: z
+        .number()
+        .int()
+        .min(1)
+        .max(50000)
+        .optional()
+        .default(DEFAULT_EXPORT_MAX_ORDERS)
+        .describe(
+          `Safety cap on the total number of orders fetched (default ${DEFAULT_EXPORT_MAX_ORDERS}, max 50000).`,
+        ),
+      file_name: z
+        .string()
+        .optional()
+        .describe(
+          "Optional base filename (without extension). Defaults to `lightfunnel_orders_<filters>_<timestamp>`.",
+        ),
+      ttl_seconds: z
+        .number()
+        .int()
+        .min(60)
+        .max(24 * 60 * 60)
+        .optional()
+        .describe(
+          "How long the generated file URL should remain downloadable, in seconds. Defaults to 1 hour. Max 24h.",
+        ),
+    }),
+    handler: async (input, client) => {
+      if (!publisher) {
+        throw new Error(
+          "lf_export_orders is not available: no file publisher is configured. " +
+            "This typically means the server was started in stdio mode without a writable temp directory, or the HTTP file store failed to initialize.",
+        );
+      }
+
+      const sinceDate = input.since_date ? new Date(input.since_date) : null;
+      const untilDate = input.until_date
+        ? new Date(input.until_date + "T23:59:59")
+        : null;
+      if (sinceDate && Number.isNaN(sinceDate.getTime())) {
+        throw new Error(`Invalid since_date: ${input.since_date}`);
+      }
+      if (untilDate && Number.isNaN(untilDate.getTime())) {
+        throw new Error(`Invalid until_date: ${input.until_date}`);
+      }
+
+      const orders: FetchOrderNode[] = [];
+      const maxOrders = input.max_orders ?? DEFAULT_EXPORT_MAX_ORDERS;
+      let apiCursor: string | undefined;
+      let pagesFetched = 0;
+      let reachedEnd = false;
+      let reachedBeforeSince = false;
+
+      while (
+        orders.length < maxOrders &&
+        !reachedEnd &&
+        !reachedBeforeSince
+      ) {
+        const variables: Record<string, unknown> = {
+          query: input.query ?? "order_by:created_at order_dir:desc",
+          first: EXPORT_PAGE_SIZE,
+        };
+        if (apiCursor) variables.after = apiCursor;
+
+        const result = await client.query<{
+          orders: Connection<FetchOrderNode>;
+        }>(FETCH_ORDER_GQL, variables);
+        pagesFetched += 1;
+
+        const edges = result.orders.edges;
+        if (!edges.length) {
+          reachedEnd = true;
+          break;
+        }
+
+        for (const edge of edges) {
+          if (orders.length >= maxOrders) break;
+          const order = edge.node;
+          if (!input.include_test && order.test) continue;
+
+          const orderDate = new Date(order.created_at);
+          if (sinceDate && orderDate < sinceDate) {
+            reachedBeforeSince = true;
+            break;
+          }
+          if (untilDate && orderDate > untilDate) continue;
+
+          if (input.normalize_phones) {
+            normalizeOrderPhones(order as unknown as OrderWithPhone);
+          }
+          orders.push(order);
+        }
+
+        if (!result.orders.pageInfo.hasNextPage) {
+          reachedEnd = true;
+        } else {
+          apiCursor = result.orders.pageInfo.endCursor ?? undefined;
+        }
+      }
+
+      const truncated =
+        orders.length >= maxOrders && !reachedEnd && !reachedBeforeSince;
+
+      const built = await buildExport(orders as unknown as ExportOrder[], {
+        format: input.format as ExportFormat,
+        includeItems: input.include_items,
+        includeUtm: input.include_utm,
+        includeRawJson: input.include_raw_json,
+      });
+
+      const fileBase = input.file_name ?? buildDefaultFileName(input.query, input.since_date, input.until_date);
+      const fileName = `${fileBase}.${built.fileExtension}`;
+      const ttlMs = input.ttl_seconds ? input.ttl_seconds * 1000 : undefined;
+
+      const published = await publisher.publish({
+        content: built.buffer,
+        contentType: built.contentType,
+        fileName,
+        ttlMs,
+      });
+
+      const sheets: string[] = ["orders"];
+      if (input.format === "xlsx") {
+        if (input.include_items) sheets.push("line_items");
+        if (input.include_utm) sheets.push("utm");
+        if (input.include_raw_json) sheets.push("raw_json");
+      }
+
+      return {
+        file_url: published.url,
+        file_name: fileName,
+        total_orders: orders.length,
+        format: input.format,
+        sheets,
+        size_bytes: published.sizeBytes,
+        expires_at: published.expiresAt,
+        truncated,
+        pages_fetched: pagesFetched,
+        date_filter: {
+          since: input.since_date ?? null,
+          until: input.until_date ?? null,
+        },
+      };
+    },
+  });
+}
+
+function buildDefaultFileName(
+  query: string | undefined,
+  since: string | undefined,
+  until: string | undefined,
+): string {
+  const productMatch = query?.match(/product_id:([A-Za-z0-9_-]+)/);
+  const productPart = productMatch ? `_${productMatch[1]}` : "";
+  const sincePart = since ? `_${since}` : "";
+  const untilPart = until ? `_${until}` : "";
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  return `lightfunnel_orders${productPart}${sincePart}${untilPart}_${ts}`;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Raw GraphQL query (escape hatch)                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -1052,20 +1289,28 @@ const rawQuery = tool({
 });
 
 /* -------------------------------------------------------------------------- */
-/*  Export all tools                                                           */
+/*  Export all tools                                                          */
 /* -------------------------------------------------------------------------- */
 
-export const tools: ToolDef[] = [
-  listOrders,
-  getOrder,
-  listProducts,
-  getProduct,
-  listFunnels,
-  getFunnel,
-  listCustomers,
-  getCustomer,
-  getAccountSettings,
-  summarizeOrders,
-  fetchAllOrders,
-  rawQuery,
-];
+export interface ToolDeps {
+  /** Optional file publisher enabling the lf_export_orders tool. */
+  publisher?: ExportPublisher | null;
+}
+
+export function buildTools(deps: ToolDeps = {}): ToolDef[] {
+  return [
+    listOrders,
+    getOrder,
+    listProducts,
+    getProduct,
+    listFunnels,
+    getFunnel,
+    listCustomers,
+    getCustomer,
+    getAccountSettings,
+    summarizeOrders,
+    fetchAllOrders,
+    buildExportOrdersTool(deps.publisher ?? null),
+    rawQuery,
+  ];
+}
