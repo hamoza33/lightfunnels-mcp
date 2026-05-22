@@ -95,6 +95,18 @@ async function main(): Promise<void> {
     });
   });
 
+  // Re-register clients lost after machine restart so the SDK's
+  // authorize handler can find them (in-memory store is ephemeral).
+  app.use("/authorize", (req, _res, next) => {
+    const clientId = (req.query.client_id ?? req.body?.client_id) as string | undefined;
+    const redirectUri = (req.query.redirect_uri ?? req.body?.redirect_uri) as string | undefined;
+    if (clientId && redirectUri) {
+      oauth.ensureClient(clientId, redirectUri).then(() => next(), next);
+      return;
+    }
+    next();
+  });
+
   app.use(
     mcpAuthRouter({
       provider: oauth,
