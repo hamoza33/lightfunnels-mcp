@@ -129,6 +129,10 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "shipping_phone", header: "shipping_phone", width: 18 },
   { key: "items_count", header: "items_count", width: 10 },
   { key: "items_summary", header: "items_summary", width: 60 },
+  { key: "utm_source", header: "utm_source", width: 18 },
+  { key: "utm_medium", header: "utm_medium", width: 14 },
+  { key: "utm_campaign", header: "utm_campaign", width: 36 },
+  { key: "utm_id", header: "utm_id", width: 24 },
   { key: "custom_fields", header: "custom_fields", width: 60 },
 ];
 
@@ -137,6 +141,15 @@ interface FlatOrderRow {
 }
 
 type ExportFunnel = NonNullable<NonNullable<ExportOrder["checkout"]>["funnel"]>;
+
+function utmLookup(
+  utm: { k: string; v: string }[] | null | undefined,
+  key: string,
+): string {
+  if (!utm) return "";
+  const entry = utm.find((u) => u.k === key);
+  return entry?.v ?? "";
+}
 
 function buildFunnelUrl(funnel: ExportFunnel | null | undefined): string {
   const domain = funnel?.preferred_domain?.name?.trim() ?? "";
@@ -192,6 +205,10 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     shipping_phone: address?.phone ?? "",
     items_count: items.length,
     items_summary: itemsSummary,
+    utm_source: utmLookup(order.utm, "source"),
+    utm_medium: utmLookup(order.utm, "medium"),
+    utm_campaign: utmLookup(order.utm, "campaign"),
+    utm_id: utmLookup(order.utm, "id"),
     custom_fields: order.custom && Object.keys(order.custom).length > 0
       ? JSON.stringify(order.custom)
       : "",
