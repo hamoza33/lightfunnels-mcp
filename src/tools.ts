@@ -35,6 +35,36 @@ const COUNTRY_CODES: Record<string, { code: string; localLen: number }> = {
   LB: { code: "961", localLen: 8 },
 };
 
+const COUNTRY_NAME_TO_ISO: Record<string, string> = {
+  "SAUDI ARABIA": "SA",
+  "UNITED ARAB EMIRATES": "AE",
+  "KUWAIT": "KW",
+  "BAHRAIN": "BH",
+  "QATAR": "QA",
+  "OMAN": "OM",
+  "EGYPT": "EG",
+  "MOROCCO": "MA",
+  "ALGERIA": "DZ",
+  "TUNISIA": "TN",
+  "JORDAN": "JO",
+  "IRAQ": "IQ",
+  "LEBANON": "LB",
+  // ISO 3166-1 alpha-3 codes
+  "SAU": "SA",
+  "ARE": "AE",
+  "KWT": "KW",
+  "BHR": "BH",
+  "QAT": "QA",
+  "OMN": "OM",
+  "EGY": "EG",
+  "MAR": "MA",
+  "DZA": "DZ",
+  "TUN": "TN",
+  "JOR": "JO",
+  "IRQ": "IQ",
+  "LBN": "LB",
+};
+
 // Unicode bidi/format control chars commonly pasted around RTL phone numbers
 // (LRE/RLE/PDF/LRM/RLM/ZWSP/BOM/WJ). Stripped along with whitespace.
 const PHONE_STRIP_CHARS = /[\s\-.()+/,;_\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
@@ -50,7 +80,10 @@ function normalizePhone(raw: string | null | undefined, countryCode?: string): s
   // Strip leading zeros (handles both "0XX" and "00XX" prefixes)
   phone = phone.replace(/^0+/, "");
 
-  const country = countryCode?.toUpperCase();
+  const rawCountry = countryCode?.toUpperCase();
+  const country = rawCountry
+    ? COUNTRY_CODES[rawCountry] ? rawCountry : COUNTRY_NAME_TO_ISO[rawCountry] ?? rawCountry
+    : undefined;
   const info = country ? COUNTRY_CODES[country] : undefined;
 
   if (info) {
@@ -910,6 +943,7 @@ const FETCH_ORDER_GQL = `query FetchOrders($first: Int, $after: String, $query: 
             }
           }
         }
+        custom
         cancelled_at
         test
         created_at(format: "YYYY-MM-DDTHH:mm:ss")
@@ -937,6 +971,7 @@ interface FetchOrderNode {
   items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
   utm: { k: string; v: string }[] | null;
   checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
+  custom: Record<string, unknown> | null;
   cancelled_at: string | null;
   test: boolean;
   created_at: string;
@@ -1238,6 +1273,10 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
       if (input.format === "xlsx") {
         if (input.include_items) sheets.push("line_items");
         if (input.include_utm) sheets.push("utm");
+        const hasCustom = orders.some(
+          (o) => o.custom && Object.keys(o.custom).length > 0,
+        );
+        if (hasCustom) sheets.push("attributes");
         if (input.include_raw_json) sheets.push("raw_json");
       }
 

@@ -69,6 +69,7 @@ export interface ExportOrder {
       preferred_domain?: { name?: string } | null;
     } | null;
   } | null;
+  custom?: Record<string, unknown> | null;
   cancelled_at?: string | null;
   test?: boolean;
   created_at?: string;
@@ -128,6 +129,7 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "shipping_phone", header: "shipping_phone", width: 18 },
   { key: "items_count", header: "items_count", width: 10 },
   { key: "items_summary", header: "items_summary", width: 60 },
+  { key: "custom_fields", header: "custom_fields", width: 60 },
 ];
 
 interface FlatOrderRow {
@@ -190,6 +192,9 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     shipping_phone: address?.phone ?? "",
     items_count: items.length,
     items_summary: itemsSummary,
+    custom_fields: order.custom && Object.keys(order.custom).length > 0
+      ? JSON.stringify(order.custom)
+      : "",
   };
 }
 
@@ -303,6 +308,38 @@ async function buildXlsx(
           k: pair.k ?? "",
           v: pair.v ?? "",
         });
+      }
+    }
+  }
+
+  // --- attributes sheet ----------------------------------------------------
+  {
+    const hasAnyCustom = orders.some(
+      (o) => o.custom && Object.keys(o.custom).length > 0,
+    );
+    if (hasAnyCustom) {
+      const sheet = wb.addWorksheet("attributes");
+      sheet.columns = [
+        { header: "order_id", key: "order_id", width: 28 },
+        { header: "order_name", key: "order_name", width: 14 },
+        { header: "order_created_at", key: "order_created_at", width: 22 },
+        { header: "attribute_key", key: "attribute_key", width: 28 },
+        { header: "attribute_value", key: "attribute_value", width: 60 },
+      ];
+      sheet.getRow(1).font = { bold: true };
+      for (const order of orders) {
+        const custom = order.custom;
+        if (!custom) continue;
+        for (const [key, value] of Object.entries(custom)) {
+          sheet.addRow({
+            order_id: order.id,
+            order_name: order.name ?? "",
+            order_created_at: order.created_at ?? "",
+            attribute_key: key,
+            attribute_value:
+              typeof value === "string" ? value : JSON.stringify(value),
+          });
+        }
       }
     }
   }
