@@ -88,36 +88,38 @@ function normalizePhone(raw: string | null | undefined, countryCode?: string): s
 
   if (info) {
     const { code, localLen } = info;
-    // Remove repeated country code prefix (e.g. "966966555..." or "971971...")
-    const doubleCode = code + code;
-    if (phone.startsWith(doubleCode)) {
+
+    // Strip duplicated country code prefixes (e.g. "966966555...")
+    while (phone.startsWith(code + code)) {
       phone = phone.slice(code.length);
     }
-    // If starts with country code already, validate
+
+    // If starts with country code already, extract and validate local part
     if (phone.startsWith(code)) {
-      const local = phone.slice(code.length);
-      // Remove leading zero from local part if present
-      const cleanLocal = local.replace(/^0+/, "");
-      if (cleanLocal.length === localLen) {
-        return code + cleanLocal;
+      const local = phone.slice(code.length).replace(/^0+/, "");
+      if (local.length === localLen) {
+        return "+" + code + local;
       }
-      // If local part is slightly off, still return with code
-      return code + cleanLocal;
+      // Local part length doesn't match — return best-effort with code
+      return "+" + code + local;
     }
-    // Local number without country code — add it
+
+    // Local number without country code
     if (phone.length === localLen) {
-      return code + phone;
+      return "+" + code + phone;
     }
-    // Local with leading zero stripped already but length matches
+    // Local with extra leading zero
     if (phone.length === localLen + 1 && phone.startsWith("0")) {
-      return code + phone.slice(1);
+      return "+" + code + phone.slice(1);
     }
-    // Best effort: add country code
-    return code + phone;
+
+    // Number doesn't match expected local length — return with + prefix only
+    // (don't blindly prepend country code to malformed numbers)
+    return "+" + phone;
   }
 
-  // No country info — just return digits without leading zeros
-  return phone;
+  // No country info — just return digits without leading zeros, with + prefix
+  return "+" + phone;
 }
 
 interface OrderWithPhone {
@@ -935,6 +937,7 @@ const FETCH_ORDER_GQL = `query FetchOrders($first: Int, $after: String, $query: 
           v
         }
         checkout {
+          link
           funnel {
             name
             slug
@@ -970,7 +973,7 @@ interface FetchOrderNode {
   shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
   items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
   utm: { k: string; v: string }[] | null;
-  checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
+  checkout: { link: string | null; funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
   custom: Record<string, unknown> | null;
   cancelled_at: string | null;
   test: boolean;

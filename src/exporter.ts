@@ -63,6 +63,7 @@ export interface ExportOrder {
   items?: ExportOrderItem[];
   utm?: { k: string; v: string }[] | null;
   checkout?: {
+    link?: string | null;
     funnel?: {
       name?: string;
       slug?: string;
@@ -140,8 +141,6 @@ interface FlatOrderRow {
   [k: string]: unknown;
 }
 
-type ExportFunnel = NonNullable<NonNullable<ExportOrder["checkout"]>["funnel"]>;
-
 function utmLookup(
   utm: { k: string; v: string }[] | null | undefined,
   key: string,
@@ -151,7 +150,18 @@ function utmLookup(
   return entry?.v ?? "";
 }
 
-function buildFunnelUrl(funnel: ExportFunnel | null | undefined): string {
+function buildFunnelUrl(order: ExportOrder): string {
+  const checkoutLink = order.checkout?.link;
+  if (checkoutLink) {
+    try {
+      const url = new URL(checkoutLink);
+      url.search = "";
+      return url.toString();
+    } catch {
+      // fall through to construct from parts
+    }
+  }
+  const funnel = order.checkout?.funnel ?? null;
   const domain = funnel?.preferred_domain?.name?.trim() ?? "";
   const slug = funnel?.slug?.trim() ?? "";
   if (!domain) return "";
@@ -190,7 +200,7 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     funnel_name: funnel?.name ?? "",
     funnel_slug: funnel?.slug ?? "",
     funnel_domain: funnel?.preferred_domain?.name ?? "",
-    funnel_url: buildFunnelUrl(funnel),
+    funnel_url: buildFunnelUrl(order),
     customer_id: customer?.id ?? "",
     customer_full_name: customer?.full_name ?? "",
     customer_email: customer?.email ?? "",
