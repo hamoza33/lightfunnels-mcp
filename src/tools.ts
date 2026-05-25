@@ -35,6 +35,36 @@ const COUNTRY_CODES: Record<string, { code: string; localLen: number }> = {
   LB: { code: "961", localLen: 8 },
 };
 
+const COUNTRY_NAME_TO_ISO: Record<string, string> = {
+  "SAUDI ARABIA": "SA",
+  "UNITED ARAB EMIRATES": "AE",
+  "KUWAIT": "KW",
+  "BAHRAIN": "BH",
+  "QATAR": "QA",
+  "OMAN": "OM",
+  "EGYPT": "EG",
+  "MOROCCO": "MA",
+  "ALGERIA": "DZ",
+  "TUNISIA": "TN",
+  "JORDAN": "JO",
+  "IRAQ": "IQ",
+  "LEBANON": "LB",
+  // ISO 3166-1 alpha-3 codes
+  "SAU": "SA",
+  "ARE": "AE",
+  "KWT": "KW",
+  "BHR": "BH",
+  "QAT": "QA",
+  "OMN": "OM",
+  "EGY": "EG",
+  "MAR": "MA",
+  "DZA": "DZ",
+  "TUN": "TN",
+  "JOR": "JO",
+  "IRQ": "IQ",
+  "LBN": "LB",
+};
+
 // Unicode bidi/format control chars commonly pasted around RTL phone numbers
 // (LRE/RLE/PDF/LRM/RLM/ZWSP/BOM/WJ). Stripped along with whitespace.
 const PHONE_STRIP_CHARS = /[\s\-.()+/,;_\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g;
@@ -50,41 +80,46 @@ function normalizePhone(raw: string | null | undefined, countryCode?: string): s
   // Strip leading zeros (handles both "0XX" and "00XX" prefixes)
   phone = phone.replace(/^0+/, "");
 
-  const country = countryCode?.toUpperCase();
+  const rawCountry = countryCode?.toUpperCase();
+  const country = rawCountry
+    ? COUNTRY_CODES[rawCountry] ? rawCountry : COUNTRY_NAME_TO_ISO[rawCountry] ?? rawCountry
+    : undefined;
   const info = country ? COUNTRY_CODES[country] : undefined;
 
   if (info) {
     const { code, localLen } = info;
-    // Remove repeated country code prefix (e.g. "966966555..." or "971971...")
-    const doubleCode = code + code;
-    if (phone.startsWith(doubleCode)) {
+
+    // Strip duplicated country code prefixes (e.g. "966966555...")
+    while (phone.startsWith(code + code)) {
       phone = phone.slice(code.length);
     }
-    // If starts with country code already, validate
+
+    // If starts with country code already, extract and validate local part
     if (phone.startsWith(code)) {
-      const local = phone.slice(code.length);
-      // Remove leading zero from local part if present
-      const cleanLocal = local.replace(/^0+/, "");
-      if (cleanLocal.length === localLen) {
-        return code + cleanLocal;
+      const local = phone.slice(code.length).replace(/^0+/, "");
+      if (local.length === localLen) {
+        return "+" + code + local;
       }
-      // If local part is slightly off, still return with code
-      return code + cleanLocal;
+      // Local part length doesn't match — return best-effort with code
+      return "+" + code + local;
     }
-    // Local number without country code — add it
+
+    // Local number without country code
     if (phone.length === localLen) {
-      return code + phone;
+      return "+" + code + phone;
     }
-    // Local with leading zero stripped already but length matches
+    // Local with extra leading zero
     if (phone.length === localLen + 1 && phone.startsWith("0")) {
-      return code + phone.slice(1);
+      return "+" + code + phone.slice(1);
     }
-    // Best effort: add country code
-    return code + phone;
+
+    // Number doesn't match expected local length — return with + prefix only
+    // (don't blindly prepend country code to malformed numbers)
+    return "+" + phone;
   }
 
-  // No country info — just return digits without leading zeros
-  return phone;
+  // No country info — just return digits without leading zeros, with + prefix
+  return "+" + phone;
 }
 
 interface OrderWithPhone {
@@ -904,6 +939,7 @@ const FETCH_ORDER_GQL = `query FetchOrders($first: Int, $after: String, $query: 
           v
         }
         checkout {
+          link
           funnel {
             name
             slug
@@ -912,6 +948,7 @@ const FETCH_ORDER_GQL = `query FetchOrders($first: Int, $after: String, $query: 
             }
           }
         }
+        custom
         cancelled_at
         test
         created_at(format: "YYYY-MM-DDTHH:mm:ss")
@@ -938,7 +975,8 @@ interface FetchOrderNode {
   shipping_address: { first_name: string; last_name: string; line1: string; line2: string; city: string; country: string; zip: string; phone: string } | null;
   items: { _id: number; title: string; sku: string; price: number; product_id: string }[];
   utm: { k: string; v: string }[] | null;
-  checkout: { funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
+  checkout: { link: string | null; funnel: { name: string; slug: string; preferred_domain: { name: string } | null } | null } | null;
+  custom: Record<string, unknown> | null;
   cancelled_at: string | null;
   test: boolean;
   created_at: string;
@@ -1228,6 +1266,10 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
       if (input.format === "xlsx") {
         if (input.include_items) sheets.push("line_items");
         if (input.include_utm) sheets.push("utm");
+        const hasCustom = orders.some(
+          (o) => o.custom && Object.keys(o.custom).length > 0,
+        );
+        if (hasCustom) sheets.push("attributes");
         if (input.include_raw_json) sheets.push("raw_json");
       }
 

@@ -63,12 +63,14 @@ export interface ExportOrder {
   items?: ExportOrderItem[];
   utm?: { k: string; v: string }[] | null;
   checkout?: {
+    link?: string | null;
     funnel?: {
       name?: string;
       slug?: string;
       preferred_domain?: { name?: string } | null;
     } | null;
   } | null;
+  custom?: Record<string, unknown> | null;
   cancelled_at?: string | null;
   test?: boolean;
   created_at?: string;
@@ -130,15 +132,38 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "shipping_phone_raw", header: "shipping_phone_raw", width: 18 },
   { key: "items_count", header: "items_count", width: 10 },
   { key: "items_summary", header: "items_summary", width: 60 },
+  { key: "utm_source", header: "utm_source", width: 18 },
+  { key: "utm_medium", header: "utm_medium", width: 14 },
+  { key: "utm_campaign", header: "utm_campaign", width: 36 },
+  { key: "utm_id", header: "utm_id", width: 24 },
+  { key: "custom_fields", header: "custom_fields", width: 60 },
 ];
 
 interface FlatOrderRow {
   [k: string]: unknown;
 }
 
-type ExportFunnel = NonNullable<NonNullable<ExportOrder["checkout"]>["funnel"]>;
+function utmLookup(
+  utm: { k: string; v: string }[] | null | undefined,
+  key: string,
+): string {
+  if (!utm) return "";
+  const entry = utm.find((u) => u.k === key);
+  return entry?.v ?? "";
+}
 
-function buildFunnelUrl(funnel: ExportFunnel | null | undefined): string {
+function buildFunnelUrl(order: ExportOrder): string {
+  const checkoutLink = order.checkout?.link;
+  if (checkoutLink) {
+    try {
+      const url = new URL(checkoutLink);
+      url.search = "";
+      return url.toString();
+    } catch {
+      // fall through to construct from parts
+    }
+  }
+  const funnel = order.checkout?.funnel ?? null;
   const domain = funnel?.preferred_domain?.name?.trim() ?? "";
   const slug = funnel?.slug?.trim() ?? "";
   if (!domain) return "";
@@ -177,7 +202,7 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     funnel_name: funnel?.name ?? "",
     funnel_slug: funnel?.slug ?? "",
     funnel_domain: funnel?.preferred_domain?.name ?? "",
-    funnel_url: buildFunnelUrl(funnel),
+    funnel_url: buildFunnelUrl(order),
     customer_id: customer?.id ?? "",
     customer_full_name: customer?.full_name ?? "",
     customer_email: customer?.email ?? "",
@@ -194,6 +219,13 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     shipping_phone_raw: (order as Record<string, unknown>)._raw_shipping_phone ?? address?.phone ?? "",
     items_count: items.length,
     items_summary: itemsSummary,
+    utm_source: utmLookup(order.utm, "source"),
+    utm_medium: utmLookup(order.utm, "medium"),
+    utm_campaign: utmLookup(order.utm, "campaign"),
+    utm_id: utmLookup(order.utm, "id"),
+    custom_fields: order.custom && Object.keys(order.custom).length > 0
+      ? JSON.stringify(order.custom)
+      : "",
   };
 }
 
@@ -307,6 +339,38 @@ async function buildXlsx(
           k: pair.k ?? "",
           v: pair.v ?? "",
         });
+      }
+    }
+  }
+
+  // --- attributes sheet ----------------------------------------------------
+  {
+    const hasAnyCustom = orders.some(
+      (o) => o.custom && Object.keys(o.custom).length > 0,
+    );
+    if (hasAnyCustom) {
+      const sheet = wb.addWorksheet("attributes");
+      sheet.columns = [
+        { header: "order_id", key: "order_id", width: 28 },
+        { header: "order_name", key: "order_name", width: 14 },
+        { header: "order_created_at", key: "order_created_at", width: 22 },
+        { header: "attribute_key", key: "attribute_key", width: 28 },
+        { header: "attribute_value", key: "attribute_value", width: 60 },
+      ];
+      sheet.getRow(1).font = { bold: true };
+      for (const order of orders) {
+        const custom = order.custom;
+        if (!custom) continue;
+        for (const [key, value] of Object.entries(custom)) {
+          sheet.addRow({
+            order_id: order.id,
+            order_name: order.name ?? "",
+            order_created_at: order.created_at ?? "",
+            attribute_key: key,
+            attribute_value:
+              typeof value === "string" ? value : JSON.stringify(value),
+          });
+        }
       }
     }
   }
