@@ -118,6 +118,7 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "customer_full_name", header: "customer_full_name", width: 24 },
   { key: "customer_email", header: "customer_email", width: 28 },
   { key: "customer_phone", header: "customer_phone", width: 18 },
+  { key: "customer_phone_raw", header: "customer_phone_raw", width: 18 },
   { key: "shipping_first_name", header: "shipping_first_name", width: 18 },
   { key: "shipping_last_name", header: "shipping_last_name", width: 18 },
   { key: "shipping_line1", header: "shipping_line1", width: 28 },
@@ -126,6 +127,7 @@ const ORDER_COLUMNS: Array<{ key: string; header: string; width?: number }> = [
   { key: "shipping_zip", header: "shipping_zip", width: 12 },
   { key: "shipping_country", header: "shipping_country", width: 10 },
   { key: "shipping_phone", header: "shipping_phone", width: 18 },
+  { key: "shipping_phone_raw", header: "shipping_phone_raw", width: 18 },
   { key: "items_count", header: "items_count", width: 10 },
   { key: "items_summary", header: "items_summary", width: 60 },
 ];
@@ -180,6 +182,7 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     customer_full_name: customer?.full_name ?? "",
     customer_email: customer?.email ?? "",
     customer_phone: customer?.phone ?? "",
+    customer_phone_raw: (order as Record<string, unknown>)._raw_customer_phone ?? customer?.phone ?? "",
     shipping_first_name: address?.first_name ?? "",
     shipping_last_name: address?.last_name ?? "",
     shipping_line1: address?.line1 ?? "",
@@ -188,6 +191,7 @@ function flattenOrder(order: ExportOrder): FlatOrderRow {
     shipping_zip: address?.zip ?? "",
     shipping_country: address?.country ?? "",
     shipping_phone: address?.phone ?? "",
+    shipping_phone_raw: (order as Record<string, unknown>)._raw_shipping_phone ?? address?.phone ?? "",
     items_count: items.length,
     items_summary: itemsSummary,
   };

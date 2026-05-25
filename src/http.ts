@@ -78,7 +78,7 @@ async function main(): Promise<void> {
   });
 
   // File downloads for `lf_export_orders` results. The 32-byte random ID in
-  // the URL path acts as a bearer token — unguessable, TTL-bounded.
+  // the URL path acts as a bearer token — unguessable, no expiry.
   app.get("/files/:id/:filename", (req, res) => fileStore.serve(req, res));
 
   app.get("/", (_req, res) => {

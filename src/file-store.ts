@@ -1,6 +1,8 @@
 /**
- * In-memory file store with TTL and total-size cap, used to serve
- * generated export files via signed-URL-style random IDs.
+ * In-memory file store with total-size cap, used to serve generated
+ * export files via signed-URL-style random IDs. Files never expire —
+ * they remain available as long as the server process is running (or
+ * until LRU eviction reclaims space for newer files).
  *
  * The HTTP entrypoint mounts a `GET /files/:id/:filename` route that
  * pulls bytes from this store. The random 32-byte ID in the URL acts
@@ -20,8 +22,6 @@ import type {
 } from "./publisher.js";
 
 export interface FileStoreOptions {
-  /** Default TTL applied to each stored file. Defaults to 1h. */
-  defaultTtlMs?: number;
   /** Hard cap on total bytes kept in memory. Oldest entries evicted (LRU). */
   maxTotalBytes?: number;
   /** Hard cap on a single file's size. */
@@ -36,16 +36,13 @@ interface Entry {
   contentType: string;
   buffer: Buffer;
   createdAt: number;
-  expiresAt: number;
 }
 
-const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
 const DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_MAX_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
 
 export class HttpFileStore implements ExportPublisher {
   private readonly entries = new Map<string, Entry>();
-  private readonly defaultTtlMs: number;
   private readonly maxTotalBytes: number;
   private readonly maxFileBytes: number;
   private readonly baseUrl: URL;
@@ -53,7 +50,6 @@ export class HttpFileStore implements ExportPublisher {
 
   constructor(opts: FileStoreOptions) {
     this.baseUrl = opts.baseUrl;
-    this.defaultTtlMs = opts.defaultTtlMs ?? DEFAULT_TTL_MS;
     this.maxTotalBytes = opts.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
     this.maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   }
@@ -71,20 +67,16 @@ export class HttpFileStore implements ExportPublisher {
       );
     }
 
-    this.evictExpired();
     this.evictUntilFits(buffer.byteLength);
 
     const id = crypto.randomBytes(32).toString("base64url");
     const safeName = sanitizeFileName(input.fileName);
-    const ttl = input.ttlMs ?? this.defaultTtlMs;
-    const now = Date.now();
     const entry: Entry = {
       id,
       fileName: safeName,
       contentType: input.contentType,
       buffer,
-      createdAt: now,
-      expiresAt: now + ttl,
+      createdAt: Date.now(),
     };
     this.entries.set(id, entry);
     this.totalBytes += buffer.byteLength;
@@ -96,7 +88,6 @@ export class HttpFileStore implements ExportPublisher {
 
     return {
       url,
-      expiresAt: new Date(entry.expiresAt).toISOString(),
       sizeBytes: buffer.byteLength,
       id,
     };
@@ -111,12 +102,7 @@ export class HttpFileStore implements ExportPublisher {
     }
     const entry = this.entries.get(id);
     if (!entry) {
-      res.status(404).type("text/plain").send("Not found or expired.");
-      return;
-    }
-    if (entry.expiresAt < Date.now()) {
-      this.delete(id);
-      res.status(410).type("text/plain").send("File expired.");
+      res.status(404).type("text/plain").send("Not found.");
       return;
     }
     res.setHeader("Content-Type", entry.contentType);
@@ -134,13 +120,6 @@ export class HttpFileStore implements ExportPublisher {
     if (!entry) return;
     this.entries.delete(id);
     this.totalBytes -= entry.buffer.byteLength;
-  }
-
-  private evictExpired(): void {
-    const now = Date.now();
-    for (const [id, entry] of this.entries) {
-      if (entry.expiresAt < now) this.delete(id);
-    }
   }
 
   private evictUntilFits(incomingBytes: number): void {
