@@ -72,6 +72,10 @@ class InMemoryClientsStore implements OAuthRegisteredClientsStore {
     this.clients.set(meta.client_id, meta);
     return meta;
   }
+
+  hasClient(id: string): boolean {
+    return this.clients.has(id);
+  }
 }
 
 function timingSafeEq(a: string, b: string): boolean {
@@ -100,7 +104,7 @@ function escapeHtml(s: string): string {
 }
 
 export class LfMcpOAuthProvider implements OAuthServerProvider {
-  readonly clientsStore: OAuthRegisteredClientsStore = new InMemoryClientsStore();
+  readonly clientsStore: InMemoryClientsStore = new InMemoryClientsStore();
 
   private readonly pending = new Map<string, PendingAuth>();
   private readonly codes = new Map<string, CodeRecord>();
@@ -234,6 +238,23 @@ export class LfMcpOAuthProvider implements OAuthServerProvider {
 
   isAdminToken(token: string): boolean {
     return timingSafeEq(token, this.adminToken);
+  }
+
+  /**
+   * Re-register a client that was lost after a machine restart.
+   * Safe because actual auth still requires MCP_AUTH_TOKEN + PKCE.
+   */
+  async ensureClient(clientId: string, redirectUri: string): Promise<void> {
+    if (this.clientsStore.hasClient(clientId)) return;
+
+    await this.clientsStore.registerClient({
+      client_id: clientId,
+      redirect_uris: [redirectUri],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      scope: "mcp:tools",
+    } as OAuthClientInformationFull);
   }
 
   private issueTokens(clientId: string, scopes: string[]): OAuthTokens {
