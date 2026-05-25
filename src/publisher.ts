@@ -21,15 +21,11 @@ export interface PublishInput {
   fileName: string;
   /** Content-Type header (used by HTTP store; informational for disk store). */
   contentType: string;
-  /** Override TTL for this entry, in milliseconds. */
-  ttlMs?: number;
 }
 
 export interface PublishResult {
   /** Absolute URL clients can fetch (https://… in HTTP mode, file:// in stdio). */
   url: string;
-  /** ISO 8601 timestamp at which the file will no longer be reachable. */
-  expiresAt: string;
   /** Final payload size in bytes. */
   sizeBytes: number;
   /** Opaque ID for this entry. */
@@ -47,13 +43,11 @@ export interface ExportPublisher {
  */
 export class DiskPublisher implements ExportPublisher {
   private readonly dir: string;
-  private readonly defaultTtlMs: number;
 
-  constructor(opts?: { dir?: string; defaultTtlMs?: number }) {
+  constructor(opts?: { dir?: string }) {
     const base = opts?.dir ?? path.join(os.tmpdir(), "lightfunnels-mcp-exports");
     fs.mkdirSync(base, { recursive: true });
     this.dir = base;
-    this.defaultTtlMs = opts?.defaultTtlMs ?? 60 * 60 * 1000;
   }
 
   publish(input: PublishInput): PublishResult {
@@ -65,10 +59,8 @@ export class DiskPublisher implements ExportPublisher {
     const safeName = input.fileName.replace(/[^a-zA-Z0-9._-]+/g, "_");
     const filePath = path.join(this.dir, `${id}_${safeName}`);
     fs.writeFileSync(filePath, buffer);
-    const ttl = input.ttlMs ?? this.defaultTtlMs;
     return {
       url: pathToFileURL(filePath).toString(),
-      expiresAt: new Date(Date.now() + ttl).toISOString(),
       sizeBytes: buffer.byteLength,
       id,
     };

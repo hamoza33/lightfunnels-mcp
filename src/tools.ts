@@ -96,9 +96,11 @@ interface OrderWithPhone {
 function normalizeOrderPhones<T extends OrderWithPhone>(order: T): T {
   const country = (order.shipping_address?.country as string) || undefined;
   if (order.customer?.phone) {
+    (order as Record<string, unknown>)._raw_customer_phone = order.customer.phone;
     order.customer.phone = normalizePhone(order.customer.phone, country);
   }
   if (order.shipping_address?.phone) {
+    (order as Record<string, unknown>)._raw_shipping_phone = order.shipping_address.phone;
     order.shipping_address.phone = normalizePhone(order.shipping_address.phone, country);
   }
   return order;
@@ -1130,15 +1132,6 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
         .describe(
           "Optional base filename (without extension). Defaults to `lightfunnel_orders_<filters>_<timestamp>`.",
         ),
-      ttl_seconds: z
-        .number()
-        .int()
-        .min(60)
-        .max(24 * 60 * 60)
-        .optional()
-        .describe(
-          "How long the generated file URL should remain downloadable, in seconds. Defaults to 1 hour. Max 24h.",
-        ),
     }),
     handler: async (input, client) => {
       if (!publisher) {
@@ -1225,13 +1218,10 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
 
       const fileBase = input.file_name ?? buildDefaultFileName(input.query, input.since_date, input.until_date);
       const fileName = `${fileBase}.${built.fileExtension}`;
-      const ttlMs = input.ttl_seconds ? input.ttl_seconds * 1000 : undefined;
-
       const published = await publisher.publish({
         content: built.buffer,
         contentType: built.contentType,
         fileName,
-        ttlMs,
       });
 
       const sheets: string[] = ["orders"];
@@ -1248,7 +1238,6 @@ function buildExportOrdersTool(publisher: ExportPublisher | null): ToolDef {
         format: input.format,
         sheets,
         size_bytes: published.sizeBytes,
-        expires_at: published.expiresAt,
         truncated,
         pages_fetched: pagesFetched,
         date_filter: {
